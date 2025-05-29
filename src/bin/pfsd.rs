@@ -293,6 +293,38 @@ impl Filesystem for Pfs {
         }
     }
 
+    fn mkdir(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &std::ffi::OsStr,
+        mode: u32,
+        umask: u32,
+        reply: fuser::ReplyEntry,
+    ) {
+        let fs_node_hash = *self.inodes.get(parent as usize).unwrap();
+        let fs_node = *self.fs_nodes.get(&fs_node_hash).unwrap();
+        if let FileType::Directory = fs_node.kind {
+        } else {
+            return reply.error(libc::ENOSYS);
+        }
+        let (fs_node_hash, content_hash, inode_number, new_fs_node) =
+            self.new_directory_node(Directory::default());
+        self.add_directory_entry(
+            &fs_node,
+            DirectoryEntry {
+                name: name.to_str().unwrap().to_owned(),
+                fs_node_hash,
+                inode_number,
+            },
+        );
+        reply.entry(
+            &Duration::from_millis(1),
+            &new_fs_node.as_file_attr(inode_number),
+            0,
+        );
+    }
+
     fn create(
         &mut self,
         _req: &fuser::Request<'_>,
