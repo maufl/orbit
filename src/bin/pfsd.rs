@@ -2,7 +2,7 @@ use core::hash;
 use std::{
     collections::BTreeMap,
     env,
-    fs::File,
+    fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
@@ -17,12 +17,13 @@ use log::{debug, error, info, warn};
 use serde::Serialize;
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Clone, Copy)]
-struct FsNodeHash([u8; 32]);
-#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Clone, Copy)]
 struct ContentHash([u8; 32]);
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Clone, Copy)]
-struct InodeNumber(usize);
+struct FsNodeHash([u8; 32]);
+
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Clone, Copy)]
+struct InodeNumber(u64);
 
 fn calculate_hash<T: Serialize>(v: &T) -> [u8; 32] {
     let mut buffer = Vec::new();
@@ -48,6 +49,8 @@ struct FsNode {
     content_hash: ContentHash,
     /// Kind of file
     kind: FileType,
+    #[serde(skip_serializing)]
+    parent_inode_number: Option<InodeNumber>,
 }
 
 impl FsNode {
@@ -93,99 +96,94 @@ struct DirectoryEntry {
 struct Directory {
     entries: Vec<DirectoryEntry>,
     #[serde(skip_serializing)]
-    parent_node_hash: Option<FsNodeHash>,
+    parent_inode_number: Option<InodeNumber>,
 }
 
 struct OpenFile {
     path: PathBuf,
-    backing_fs_node_hash: FsNodeHash,
     backing_file: File,
+    parent_inode_number: InodeNumber,
     writable: bool,
 }
 
 #[derive(Default)]
 struct Pfs {
     root_node: FsNode,
-    fs_nodes: BTreeMap<FsNodeHash, FsNode>,
     directories: BTreeMap<ContentHash, Directory>,
     data_dir: String,
-    inodes: Vec<FsNodeHash>,
+    inodes: Vec<FsNode>,
     open_files: Vec<Option<OpenFile>>,
 }
 
 impl Pfs {
-    fn find_file(p: &Path) -> Option<FsNode> {
-        for segment in p {}
-        None
-    }
-
     fn empty(data_dir: String) -> Pfs {
         let mut pfs = Pfs {
             data_dir,
             root_node: FsNode::default(),
             directories: BTreeMap::new(),
-            inodes: vec![FsNodeHash::default(); 1],
+            inodes: vec![FsNode::default(); 1],
             ..Default::default()
         };
-        let (fs_content_hash, content_hash, inode_number, fs_node) =
-            pfs.new_directory_node(Directory::default());
+        let (content_hash, fs_node) = pfs.new_directory_node(Directory::default(), None);
+        pfs.assign_inode_number(fs_node.clone());
         pfs.root_node = fs_node;
         pfs
+    }
+
+    fn assign_inode_number(&mut self, fs_node: FsNode) -> InodeNumber {
+        self.inodes.push(fs_node);
+        InodeNumber((self.inodes.len() - 1) as u64)
     }
 
     fn new_directory_node(
         &mut self,
         directory: Directory,
-    ) -> (FsNodeHash, ContentHash, InodeNumber, FsNode) {
+        parent_inode_number: Option<InodeNumber>,
+    ) -> (ContentHash, FsNode) {
         let content_hash = ContentHash(calculate_hash(&directory));
+        self.directories.insert(content_hash, directory);
         let directory_node = FsNode {
             kind: FileType::Directory,
             modification_time: Utc::now(),
             size: 0,
             content_hash,
+            parent_inode_number,
         };
-        let fs_node_hash = FsNodeHash(calculate_hash(&directory_node));
-        self.fs_nodes.insert(fs_node_hash, directory_node);
-        self.inodes.push(fs_node_hash);
-        let inode_number = InodeNumber(self.inodes.len() - 1);
-        self.directories.insert(content_hash, directory);
-        (fs_node_hash, content_hash, inode_number, directory_node)
+        (content_hash, directory_node)
     }
 
-    fn add_directory_entry(
-        &mut self,
-        fs_node: &FsNode,
-        new_entry: DirectoryEntry,
-    ) -> (FsNodeHash, ContentHash, InodeNumber, FsNode) {
-        let mut directory = self.directories.get(&fs_node.content_hash).unwrap().clone();
+    fn add_directory_entry(&mut self, inode_number: InodeNumber, new_entry: DirectoryEntry) {
+        let directory_node = self.inodes.get(inode_number.0 as usize).unwrap().clone();
+        let mut directory = self
+            .directories
+            .get(&directory_node.content_hash)
+            .unwrap()
+            .clone();
         directory.entries.push(new_entry);
-        let (fs_node_hash, content_hash, inode_number, fs_node) =
-            self.new_directory_node(directory.clone());
-        if let Some(parent_hash) = directory.parent_node_hash {
-            let (new_parent_node_hash, _, _, _) = self.update_directory_entry(
-                &parent_hash,
-                &FsNodeHash(calculate_hash(&fs_node)),
-                fs_node_hash,
-                inode_number,
+        let parent_inode_number = directory.parent_inode_number;
+        let (content_hash, new_directory_node) =
+            self.new_directory_node(directory, directory_node.parent_inode_number);
+        self.inodes[inode_number.0 as usize] = new_directory_node;
+        if let Some(parent_inode_number) = parent_inode_number {
+            let old_directory_hash = FsNodeHash(calculate_hash(&directory_node));
+            let new_directory_hash = FsNodeHash(calculate_hash(&new_directory_node));
+            self.update_directory_entry(
+                parent_inode_number,
+                &old_directory_hash,
+                new_directory_hash,
             );
-            self.directories
-                .get_mut(&content_hash)
-                .unwrap()
-                .parent_node_hash = Some(new_parent_node_hash);
         } else {
-            self.root_node = fs_node;
+            self.root_node = new_directory_node;
         }
-        (fs_node_hash, content_hash, inode_number, fs_node)
     }
 
     fn update_directory_entry(
         &mut self,
-        old_directory_hash: &FsNodeHash,
+        inode_number: InodeNumber,
         old_entry_hash: &FsNodeHash,
         new_entry_fs_node_hash: FsNodeHash,
-        new_entry_inode_number: InodeNumber,
-    ) -> (FsNodeHash, ContentHash, InodeNumber, FsNode) {
-        let directory_node = self.fs_nodes.get(old_directory_hash).unwrap();
+    ) {
+        let directory_node = self.inodes.get(inode_number.0 as usize).unwrap().clone();
         let mut directory = self
             .directories
             .get(&directory_node.content_hash)
@@ -194,44 +192,35 @@ impl Pfs {
         for entry in directory.entries.iter_mut() {
             if &entry.fs_node_hash == old_entry_hash {
                 entry.fs_node_hash = new_entry_fs_node_hash;
-                entry.inode_number = new_entry_inode_number;
             }
         }
-        let old_parent_node_hash = directory.parent_node_hash;
-        let (fs_node_hash, content_hash, inode_number, fs_node) =
-            self.new_directory_node(directory);
-        if let Some(old_parent_node_hash) = old_parent_node_hash {
-            let (new_parent_node_hash, _, _, _) = self.update_directory_entry(
-                &old_parent_node_hash,
-                old_directory_hash,
-                fs_node_hash,
-                inode_number,
-            );
-            self.directories
-                .get_mut(&content_hash)
-                .unwrap()
-                .parent_node_hash = Some(new_parent_node_hash);
+        let (new_content_hash, new_directory_node) =
+            self.new_directory_node(directory, directory_node.parent_inode_number);
+        self.inodes[inode_number.0 as usize] = new_directory_node;
+        if let Some(parent_inode) = directory_node.parent_inode_number {
+            let old_directory_hash = FsNodeHash(calculate_hash(&directory_node));
+            let new_directory_hash = FsNodeHash(calculate_hash(&new_directory_node));
+            self.update_directory_entry(parent_inode, &old_directory_hash, new_directory_hash);
         } else {
-            self.root_node = fs_node;
-        }
-        (fs_node_hash, content_hash, inode_number, fs_node)
+            self.root_node = new_directory_node;
+        };
     }
 
     fn new_file_node(
         &mut self,
         content_hash: ContentHash,
         size: u64,
-    ) -> (FsNodeHash, InodeNumber, FsNode) {
+        parent_inode_number: Option<InodeNumber>,
+    ) -> (FsNodeHash, FsNode) {
         let file_node = FsNode {
             kind: FileType::RegularFile,
             modification_time: Utc::now(),
             size,
             content_hash,
+            parent_inode_number,
         };
         let fs_node_hash = FsNodeHash(calculate_hash(&file_node));
-        self.fs_nodes.insert(fs_node_hash, file_node);
-        self.inodes.push(fs_node_hash);
-        (fs_node_hash, InodeNumber(self.inodes.len() - 1), file_node)
+        (fs_node_hash, file_node)
     }
 }
 
@@ -245,9 +234,8 @@ impl Filesystem for Pfs {
     ) {
         debug!("Called getattr with ino: {} fh: {:?}", ino, fh);
         let ttl = Duration::from_millis(1);
-        let fs_node_hash = self.inodes.get(ino as usize).unwrap();
-        let fs_node = self.fs_nodes.get(fs_node_hash).unwrap();
-        let attrs = fs_node.as_file_attr(InodeNumber(ino as usize));
+        let fs_node = self.inodes.get(ino as usize).unwrap();
+        let attrs = fs_node.as_file_attr(InodeNumber(ino));
         debug!("Attrs are {:?}", attrs);
         reply.attr(&ttl, &attrs);
     }
@@ -264,33 +252,34 @@ impl Filesystem for Pfs {
             "Called readdir with ino: {} fh: {} offset: {}",
             ino, fh, offset
         );
-        if ino == 1 {
-            if offset == 0 {
-                reply.add(1, 0, fuser::FileType::Directory, ".");
-                reply.add(1, 1, fuser::FileType::Directory, "..");
-                let root_dir = self
-                    .directories
-                    .get(&self.root_node.content_hash)
-                    .expect("To get root dir");
-                let mut offset = 2;
-                for entry in root_dir.entries.iter() {
-                    info!(
-                        "Dir entry with name {} and ino {}",
-                        &entry.name, entry.inode_number.0
-                    );
-                    reply.add(
-                        entry.inode_number.0 as u64,
-                        offset,
-                        fuser::FileType::RegularFile,
-                        &entry.name,
-                    );
-                    offset += 1;
-                }
-            }
-            reply.ok()
+        let fs_node = self.inodes.get(ino as usize).unwrap();
+        if let FileType::Directory = fs_node.kind {
         } else {
-            reply.error(libc::ENOENT);
+            return reply.error(libc::ENOENT);
+        };
+        if offset == 0 {
+            reply.add(1, 0, fuser::FileType::Directory, ".");
+            reply.add(1, 1, fuser::FileType::Directory, "..");
+            let dir = self
+                .directories
+                .get(&fs_node.content_hash)
+                .expect("To get root dir");
+            let mut offset = 2;
+            for entry in dir.entries.iter() {
+                info!(
+                    "Dir entry with name {} and ino {}",
+                    &entry.name, entry.inode_number.0
+                );
+                reply.add(
+                    entry.inode_number.0 as u64,
+                    offset,
+                    fuser::FileType::RegularFile,
+                    &entry.name,
+                );
+                offset += 1;
+            }
         }
+        reply.ok()
     }
 
     fn mkdir(
@@ -302,16 +291,17 @@ impl Filesystem for Pfs {
         umask: u32,
         reply: fuser::ReplyEntry,
     ) {
-        let fs_node_hash = *self.inodes.get(parent as usize).unwrap();
-        let fs_node = *self.fs_nodes.get(&fs_node_hash).unwrap();
+        let fs_node = *self.inodes.get(parent as usize).unwrap();
         if let FileType::Directory = fs_node.kind {
         } else {
             return reply.error(libc::ENOSYS);
         }
-        let (fs_node_hash, content_hash, inode_number, new_fs_node) =
-            self.new_directory_node(Directory::default());
+        let (content_hash, fs_node) =
+            self.new_directory_node(Directory::default(), Some(InodeNumber(parent)));
+        let fs_node_hash = FsNodeHash(calculate_hash(&fs_node));
+        let inode_number = self.assign_inode_number(fs_node);
         self.add_directory_entry(
-            &fs_node,
+            InodeNumber(parent),
             DirectoryEntry {
                 name: name.to_str().unwrap().to_owned(),
                 fs_node_hash,
@@ -320,7 +310,7 @@ impl Filesystem for Pfs {
         );
         reply.entry(
             &Duration::from_millis(1),
-            &new_fs_node.as_file_attr(inode_number),
+            &fs_node.as_file_attr(inode_number),
             0,
         );
     }
@@ -339,28 +329,26 @@ impl Filesystem for Pfs {
             "Called create with parent: {} name: {:?} mode: {} umask: {} flags: {}",
             parent, name, mode, umask, flags
         );
-        if parent != fuser::FUSE_ROOT_ID {
-            return reply.error(libc::ENOSYS);
-        }
         let temp_file_path = self.data_dir.clone() + "/" + &Utc::now().to_rfc3339();
-        let (fs_node_hash, inode_number, fs_node) = self.new_file_node(ContentHash::default(), 0);
+        let (fs_node_hash, fs_node) =
+            self.new_file_node(ContentHash::default(), 0, Some(InodeNumber(parent)));
+        self.inodes.push(fs_node.clone());
+        let inode_number = InodeNumber((self.inodes.len() - 1) as u64);
         let open_file = OpenFile {
             backing_file: File::create_new(&temp_file_path).unwrap(),
-            backing_fs_node_hash: fs_node_hash,
+            parent_inode_number: InodeNumber(parent),
             path: PathBuf::from(temp_file_path),
             writable: (flags & O_WRONLY > 0) || (flags & O_RDWR > 0),
         };
         self.open_files.push(Some(open_file));
-        let root_node = self.root_node;
-        let (_root_node_hash, _root_dir_hash, _root_inode_number, _root_node) = self
-            .add_directory_entry(
-                &root_node,
-                DirectoryEntry {
-                    name: name.to_str().unwrap().to_owned(),
-                    fs_node_hash,
-                    inode_number,
-                },
-            );
+        self.add_directory_entry(
+            InodeNumber(parent),
+            DirectoryEntry {
+                name: name.to_str().unwrap().to_owned(),
+                fs_node_hash,
+                inode_number,
+            },
+        );
         reply.created(
             &Duration::from_secs(60),
             &fs_node.as_file_attr(inode_number),
@@ -376,8 +364,8 @@ impl Filesystem for Pfs {
             warn!("Tried to open a file in write mode");
             return reply.error(libc::ENOSYS);
         };
-        let fs_node_hash = self.inodes.get(_ino as usize).unwrap();
-        let content_hash = self.fs_nodes.get(fs_node_hash).unwrap().content_hash;
+        let fs_node = self.inodes.get(_ino as usize).unwrap();
+        let content_hash = fs_node.content_hash;
         let path = PathBuf::from(
             self.data_dir.clone()
                 + "/"
@@ -385,7 +373,7 @@ impl Filesystem for Pfs {
         );
         let open_file = OpenFile {
             backing_file: File::open(&path).unwrap(),
-            backing_fs_node_hash: *fs_node_hash,
+            parent_inode_number: fs_node.parent_inode_number.unwrap(),
             path,
             writable,
         };
@@ -475,20 +463,15 @@ impl Filesystem for Pfs {
                 open_file.path, new_file_path, e
             );
         };
-        let original_fs_node_hash = open_file.backing_fs_node_hash;
-        debug!(
-            "Storing new fs node with content hash {:?} and size {}",
-            content_hash, size
-        );
-        let (fs_node_hash, inode_number, fs_node) = self.new_file_node(content_hash, size);
-        let root_node = self.root_node;
+        let old_fs_node = self.inodes.get(_ino as usize).unwrap().clone();
+        let (fs_node_hash, fs_node) =
+            self.new_file_node(content_hash, size, Some(InodeNumber(_ino)));
         self.update_directory_entry(
-            &FsNodeHash(calculate_hash(&root_node)),
-            &original_fs_node_hash,
+            open_file.parent_inode_number,
+            &FsNodeHash(calculate_hash(&old_fs_node)),
             fs_node_hash,
-            inode_number,
         );
-        self.inodes[_ino as usize] = fs_node_hash;
+        self.inodes[_ino as usize] = fs_node;
         reply.ok()
     }
 
@@ -502,10 +485,11 @@ impl Filesystem for Pfs {
         if parent != 1 {
             return reply.error(libc::ENOENT);
         }
-        let root_directory = self.directories.get(&self.root_node.content_hash).unwrap();
-        for entry in root_directory.entries.iter() {
+        let fs_node = self.inodes.get(parent as usize).unwrap();
+        let directory = self.directories.get(&fs_node.content_hash).unwrap();
+        for entry in directory.entries.iter() {
             if &entry.name == name.to_str().unwrap() {
-                let fs_node = self.fs_nodes.get(&entry.fs_node_hash).unwrap();
+                let fs_node = self.inodes.get(entry.inode_number.0 as usize).unwrap();
                 return reply.entry(
                     &Duration::from_millis(1),
                     &fs_node.as_file_attr(entry.inode_number),
