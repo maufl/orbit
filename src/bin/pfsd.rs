@@ -82,6 +82,38 @@ impl FsNode {
             blksize: 0,
         }
     }
+
+    fn new_directory_node(
+        content_hash: ContentHash,
+        size: u64,
+        parent_inode_number: Option<InodeNumber>,
+    ) -> FsNode {
+        FsNode {
+            kind: FileType::Directory,
+            modification_time: Utc::now(),
+            size,
+            content_hash,
+            parent_inode_number,
+        }
+    }
+
+    fn new_file_node(
+        content_hash: ContentHash,
+        size: u64,
+        parent_inode_number: Option<InodeNumber>,
+    ) -> FsNode {
+        FsNode {
+            kind: FileType::RegularFile,
+            modification_time: Utc::now(),
+            size,
+            content_hash,
+            parent_inode_number,
+        }
+    }
+
+    fn calculate_hash(&self) -> FsNodeHash {
+        FsNodeHash(calculate_hash(&self))
+    }
 }
 
 #[derive(Default, Serialize, Clone)]
@@ -97,6 +129,12 @@ struct Directory {
     entries: Vec<DirectoryEntry>,
     #[serde(skip_serializing)]
     parent_inode_number: Option<InodeNumber>,
+}
+
+impl Directory {
+    fn calculate_hash(&self) -> ContentHash {
+        ContentHash(calculate_hash(&self))
+    }
 }
 
 struct OpenFile {
@@ -124,32 +162,27 @@ impl Pfs {
             inodes: vec![FsNode::default(); 1],
             ..Default::default()
         };
-        let (content_hash, fs_node) = pfs.new_directory_node(Directory::default(), None);
+        let fs_node = pfs.new_directory_node(Directory::default(), None);
         pfs.assign_inode_number(fs_node.clone());
         pfs.root_node = fs_node;
         pfs
-    }
-
-    fn assign_inode_number(&mut self, fs_node: FsNode) -> InodeNumber {
-        self.inodes.push(fs_node);
-        InodeNumber((self.inodes.len() - 1) as u64)
     }
 
     fn new_directory_node(
         &mut self,
         directory: Directory,
         parent_inode_number: Option<InodeNumber>,
-    ) -> (ContentHash, FsNode) {
-        let content_hash = ContentHash(calculate_hash(&directory));
-        self.directories.insert(content_hash, directory);
-        let directory_node = FsNode {
-            kind: FileType::Directory,
-            modification_time: Utc::now(),
-            size: 0,
-            content_hash,
-            parent_inode_number,
-        };
-        (content_hash, directory_node)
+    ) -> FsNode {
+        let directory_node =
+            FsNode::new_directory_node(directory.calculate_hash(), 0, parent_inode_number);
+        self.directories
+            .insert(directory_node.content_hash, directory);
+        directory_node
+    }
+
+    fn assign_inode_number(&mut self, fs_node: FsNode) -> InodeNumber {
+        self.inodes.push(fs_node);
+        InodeNumber((self.inodes.len() - 1) as u64)
     }
 
     fn add_directory_entry(&mut self, inode_number: InodeNumber, new_entry: DirectoryEntry) {
@@ -161,16 +194,14 @@ impl Pfs {
             .clone();
         directory.entries.push(new_entry);
         let parent_inode_number = directory.parent_inode_number;
-        let (content_hash, new_directory_node) =
+        let new_directory_node =
             self.new_directory_node(directory, directory_node.parent_inode_number);
         self.inodes[inode_number.0 as usize] = new_directory_node;
         if let Some(parent_inode_number) = parent_inode_number {
-            let old_directory_hash = FsNodeHash(calculate_hash(&directory_node));
-            let new_directory_hash = FsNodeHash(calculate_hash(&new_directory_node));
             self.update_directory_entry(
                 parent_inode_number,
-                &old_directory_hash,
-                new_directory_hash,
+                &directory_node.calculate_hash(),
+                new_directory_node.calculate_hash(),
             );
         } else {
             self.root_node = new_directory_node;
@@ -194,33 +225,18 @@ impl Pfs {
                 entry.fs_node_hash = new_entry_fs_node_hash;
             }
         }
-        let (new_content_hash, new_directory_node) =
+        let new_directory_node =
             self.new_directory_node(directory, directory_node.parent_inode_number);
         self.inodes[inode_number.0 as usize] = new_directory_node;
         if let Some(parent_inode) = directory_node.parent_inode_number {
-            let old_directory_hash = FsNodeHash(calculate_hash(&directory_node));
-            let new_directory_hash = FsNodeHash(calculate_hash(&new_directory_node));
-            self.update_directory_entry(parent_inode, &old_directory_hash, new_directory_hash);
+            self.update_directory_entry(
+                parent_inode,
+                &directory_node.calculate_hash(),
+                new_directory_node.calculate_hash(),
+            );
         } else {
             self.root_node = new_directory_node;
         };
-    }
-
-    fn new_file_node(
-        &mut self,
-        content_hash: ContentHash,
-        size: u64,
-        parent_inode_number: Option<InodeNumber>,
-    ) -> (FsNodeHash, FsNode) {
-        let file_node = FsNode {
-            kind: FileType::RegularFile,
-            modification_time: Utc::now(),
-            size,
-            content_hash,
-            parent_inode_number,
-        };
-        let fs_node_hash = FsNodeHash(calculate_hash(&file_node));
-        (fs_node_hash, file_node)
     }
 }
 
@@ -296,8 +312,7 @@ impl Filesystem for Pfs {
         } else {
             return reply.error(libc::ENOSYS);
         }
-        let (content_hash, fs_node) =
-            self.new_directory_node(Directory::default(), Some(InodeNumber(parent)));
+        let fs_node = self.new_directory_node(Directory::default(), Some(InodeNumber(parent)));
         let fs_node_hash = FsNodeHash(calculate_hash(&fs_node));
         let inode_number = self.assign_inode_number(fs_node);
         self.add_directory_entry(
@@ -330,8 +345,7 @@ impl Filesystem for Pfs {
             parent, name, mode, umask, flags
         );
         let temp_file_path = self.data_dir.clone() + "/" + &Utc::now().to_rfc3339();
-        let (fs_node_hash, fs_node) =
-            self.new_file_node(ContentHash::default(), 0, Some(InodeNumber(parent)));
+        let fs_node = FsNode::new_file_node(ContentHash::default(), 0, Some(InodeNumber(parent)));
         self.inodes.push(fs_node.clone());
         let inode_number = InodeNumber((self.inodes.len() - 1) as u64);
         let open_file = OpenFile {
@@ -345,7 +359,7 @@ impl Filesystem for Pfs {
             InodeNumber(parent),
             DirectoryEntry {
                 name: name.to_str().unwrap().to_owned(),
-                fs_node_hash,
+                fs_node_hash: fs_node.calculate_hash(),
                 inode_number,
             },
         );
@@ -464,14 +478,13 @@ impl Filesystem for Pfs {
             );
         };
         let old_fs_node = self.inodes.get(_ino as usize).unwrap().clone();
-        let (fs_node_hash, fs_node) =
-            self.new_file_node(content_hash, size, Some(InodeNumber(_ino)));
+        let new_fs_node = FsNode::new_file_node(content_hash, size, Some(InodeNumber(_ino)));
         self.update_directory_entry(
             open_file.parent_inode_number,
-            &FsNodeHash(calculate_hash(&old_fs_node)),
-            fs_node_hash,
+            &old_fs_node.calculate_hash(),
+            new_fs_node.calculate_hash(),
         );
-        self.inodes[_ino as usize] = fs_node;
+        self.inodes[_ino as usize] = new_fs_node;
         reply.ok()
     }
 
