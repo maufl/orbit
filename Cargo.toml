@@ -19,3 +19,6 @@ simple_logger = "5.0.0"
 [[bin]]
 name = "pfsd"
 path = "src/bin/pfsd.rs"
+
+[dev-dependencies]
+uuid = { version = "1.17.0", features = ["v4"] }
