@@ -1,9 +1,9 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, File},
+    fs::File,
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::FileExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Duration, SystemTime},
 };
 

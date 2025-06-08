@@ -2,7 +2,7 @@ use std::env;
 
 use pfs::Pfs;
 
-use log::{debug, error, info, warn};
+use log::info;
 
 fn main() {
     simple_logger::init().unwrap();
