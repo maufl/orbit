@@ -499,9 +499,6 @@ impl Filesystem for Pfs {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEntry,
     ) {
-        if parent != 1 {
-            return reply.error(libc::ENOENT);
-        }
         let (_fs_node, directory) = match self.get_directory(parent) {
             Ok(v) => v,
             Err(e) => return reply.error(e),
