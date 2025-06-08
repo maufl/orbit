@@ -222,3 +222,34 @@ fn write_large_file() {
     
     drop(guard);
 }
+
+#[test]
+fn delete_file() {
+    let (guard, mount_point) = setup();
+    thread::sleep(Duration::from_millis(100));
+    
+    let file_path = format!("{}/delete_me.txt", mount_point);
+    let test_content = "This file will be deleted";
+    
+    // Create and write to file
+    {
+        let mut file = fs::File::create_new(&file_path).expect("To create file");
+        file.write_all(test_content.as_bytes()).expect("To write to file");
+        file.flush().expect("To flush file");
+    }
+    thread::sleep(Duration::from_millis(50));
+    
+    // Verify file exists and has correct content
+    assert!(fs::metadata(&file_path).unwrap().is_file());
+    let content = fs::read_to_string(&file_path).expect("To read file");
+    assert_eq!(content, test_content);
+    
+    // Delete the file
+    fs::remove_file(&file_path).expect("To delete file");
+    thread::sleep(Duration::from_millis(50));
+    
+    // Verify file no longer exists
+    assert!(fs::metadata(&file_path).is_err());
+    
+    drop(guard);
+}

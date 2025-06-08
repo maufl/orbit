@@ -29,7 +29,7 @@ fn calculate_hash<T: Serialize>(v: &T) -> [u8; 32] {
     hmac_sha256::Hash::hash(&buffer)
 }
 
-#[derive(Default, Clone, Copy, Serialize)]
+#[derive(Default, Clone, Copy, Serialize, PartialEq)]
 enum FileType {
     #[default]
     Directory,
@@ -204,6 +204,41 @@ impl Pfs {
         } else {
             self.root_node = new_directory_node;
         }
+    }
+
+    fn remove_directory_entry(
+        &mut self,
+        inode_number: InodeNumber,
+        entry_name: &str,
+    ) -> Result<(), i32> {
+        let (directory_node, mut directory) = self.get_directory(inode_number.0)?;
+
+        // Find and remove the entry
+        let entry_index = directory
+            .entries
+            .iter()
+            .position(|entry| entry.name == entry_name);
+        match entry_index {
+            Some(index) => {
+                directory.entries.remove(index);
+            }
+            None => return Err(libc::ENOENT),
+        }
+
+        let parent_inode_number = directory.parent_inode_number;
+        let new_directory_node =
+            self.new_directory_node(directory, directory_node.parent_inode_number);
+        self.inodes[inode_number.0 as usize] = new_directory_node;
+        if let Some(parent_inode_number) = parent_inode_number {
+            self.update_directory_entry(
+                parent_inode_number,
+                &directory_node.calculate_hash(),
+                new_directory_node.calculate_hash(),
+            );
+        } else {
+            self.root_node = new_directory_node;
+        }
+        Ok(())
     }
 
     fn update_directory_entry(
@@ -514,5 +549,50 @@ impl Filesystem for Pfs {
             }
         }
         return reply.error(libc::ENOENT);
+    }
+
+    fn unlink(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &std::ffi::OsStr,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let file_name = match name.to_str() {
+            Some(name) => name,
+            None => return reply.error(libc::EINVAL),
+        };
+
+        // Check that the entry exists and is a file (not a directory)
+        let (_fs_node, directory) = match self.get_directory(parent) {
+            Ok(v) => v,
+            Err(e) => return reply.error(e),
+        };
+
+        let file_entry = directory
+            .entries
+            .iter()
+            .find(|entry| entry.name == file_name);
+        let file_entry = match file_entry {
+            Some(entry) => entry,
+            None => return reply.error(libc::ENOENT),
+        };
+
+        // Get the file node to check if it's actually a file
+        let file_node = match self.inodes.get(file_entry.inode_number.0 as usize) {
+            Some(node) => node,
+            None => return reply.error(libc::ENOENT),
+        };
+
+        // Only allow unlinking files, not directories
+        if file_node.kind != FileType::RegularFile {
+            return reply.error(libc::EISDIR);
+        }
+
+        // Remove the entry from the directory
+        match self.remove_directory_entry(InodeNumber(parent), file_name) {
+            Ok(()) => reply.ok(),
+            Err(error) => reply.error(error),
+        }
     }
 }
