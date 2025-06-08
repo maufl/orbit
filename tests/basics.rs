@@ -253,3 +253,80 @@ fn delete_file() {
     
     drop(guard);
 }
+
+#[test]
+fn rename_file() {
+    let (guard, mount_point) = setup();
+    thread::sleep(Duration::from_millis(100));
+    
+    let old_file_path = format!("{}/old_name.txt", mount_point);
+    let new_file_path = format!("{}/new_name.txt", mount_point);
+    let test_content = "This file will be renamed";
+    
+    // Create and write to file
+    {
+        let mut file = fs::File::create_new(&old_file_path).expect("To create file");
+        file.write_all(test_content.as_bytes()).expect("To write to file");
+        file.flush().expect("To flush file");
+    }
+    thread::sleep(Duration::from_millis(50));
+    
+    // Verify file exists with old name
+    assert!(fs::metadata(&old_file_path).unwrap().is_file());
+    let content = fs::read_to_string(&old_file_path).expect("To read file");
+    assert_eq!(content, test_content);
+    
+    // Rename the file
+    fs::rename(&old_file_path, &new_file_path).expect("To rename file");
+    thread::sleep(Duration::from_millis(50));
+    
+    // Verify old file no longer exists
+    assert!(fs::metadata(&old_file_path).is_err());
+    
+    // Verify new file exists and has correct content
+    assert!(fs::metadata(&new_file_path).unwrap().is_file());
+    let content = fs::read_to_string(&new_file_path).expect("To read renamed file");
+    assert_eq!(content, test_content);
+    
+    drop(guard);
+}
+
+#[test]
+fn rename_file_to_different_directory() {
+    let (guard, mount_point) = setup();
+    thread::sleep(Duration::from_millis(100));
+    
+    // Create a subdirectory
+    let subdir_path = format!("{}/subdir", mount_point);
+    fs::create_dir(&subdir_path).expect("To create subdirectory");
+    thread::sleep(Duration::from_millis(50));
+    
+    let old_file_path = format!("{}/file.txt", mount_point);
+    let new_file_path = format!("{}/subdir/moved_file.txt", mount_point);
+    let test_content = "This file will be moved to subdirectory";
+    
+    // Create and write to file in root
+    {
+        let mut file = fs::File::create_new(&old_file_path).expect("To create file");
+        file.write_all(test_content.as_bytes()).expect("To write to file");
+        file.flush().expect("To flush file");
+    }
+    thread::sleep(Duration::from_millis(50));
+    
+    // Verify file exists in root
+    assert!(fs::metadata(&old_file_path).unwrap().is_file());
+    
+    // Move file to subdirectory with new name
+    fs::rename(&old_file_path, &new_file_path).expect("To move file to subdirectory");
+    thread::sleep(Duration::from_millis(50));
+    
+    // Verify old file no longer exists in root
+    assert!(fs::metadata(&old_file_path).is_err());
+    
+    // Verify new file exists in subdirectory and has correct content
+    assert!(fs::metadata(&new_file_path).unwrap().is_file());
+    let content = fs::read_to_string(&new_file_path).expect("To read moved file");
+    assert_eq!(content, test_content);
+    
+    drop(guard);
+}

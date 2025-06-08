@@ -595,4 +595,90 @@ impl Filesystem for Pfs {
             Err(error) => reply.error(error),
         }
     }
+
+    fn rename(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &std::ffi::OsStr,
+        newparent: u64,
+        newname: &std::ffi::OsStr,
+        flags: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        debug!(
+            "Called rename with parent: {} name: {:?} newparent: {} newname: {:?} flags: {}",
+            parent, name, newparent, newname, flags
+        );
+
+        let old_name = match name.to_str() {
+            Some(name) => name,
+            None => return reply.error(libc::EINVAL),
+        };
+
+        let new_name = match newname.to_str() {
+            Some(name) => name,
+            None => return reply.error(libc::EINVAL),
+        };
+
+        // Get the source directory and find the entry to rename
+        let (_source_fs_node, source_directory) = match self.get_directory(parent) {
+            Ok(v) => v,
+            Err(e) => return reply.error(e),
+        };
+
+        let source_entry = source_directory
+            .entries
+            .iter()
+            .find(|entry| entry.name == old_name);
+        let source_entry = match source_entry {
+            Some(entry) => entry.clone(),
+            None => return reply.error(libc::ENOENT),
+        };
+
+        // Verify the destination directory exists
+        let (dest_fs_node, dest_directory) = match self.get_directory(newparent) {
+            Ok(v) => v,
+            Err(e) => return reply.error(e),
+        };
+
+        // Check if destination already exists
+        if parent == newparent && old_name == new_name {
+            // Renaming to the same name in the same directory - do nothing
+            return reply.ok();
+        }
+
+        // Check if destination already exists
+        if dest_directory
+            .entries
+            .iter()
+            .any(|entry| entry.name == new_name)
+        {
+            return reply.error(libc::EEXIST);
+        }
+
+        // Update the parent inode number in the fs_node if moving to a different directory
+        if parent != newparent {
+            let fs_node = self
+                .inodes
+                .get_mut(source_entry.inode_number.0 as usize)
+                .unwrap();
+            fs_node.parent_inode_number = Some(InodeNumber(newparent));
+        }
+
+        // Add the entry to the destination directory with the new name (first)
+        let new_entry = DirectoryEntry {
+            name: new_name.to_owned(),
+            fs_node_hash: source_entry.fs_node_hash,
+            inode_number: source_entry.inode_number,
+        };
+        self.add_directory_entry(InodeNumber(newparent), new_entry);
+
+        // Remove the entry from the source directory (second)
+        if let Err(error) = self.remove_directory_entry(InodeNumber(parent), old_name) {
+            return reply.error(error);
+        }
+
+        reply.ok()
+    }
 }
