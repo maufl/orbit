@@ -15,7 +15,7 @@ fn main() {
     let data_dir = data_home + "/pfs_data";
     std::fs::create_dir_all(&data_dir).expect("To create the data dir");
     std::fs::create_dir_all(data_dir.clone() + "/tmp").expect("To create the temporary file dir");
-    let fs = Pfs::empty(data_dir);
+    let fs = Pfs::initialize(data_dir).expect("Failed to initialize filesystem");
     info!("Mounting to {}", mount_point);
     let (send, recv) = std::sync::mpsc::channel();
     let send_ctrlc = send.clone();
