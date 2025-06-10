@@ -20,7 +20,7 @@
 ## Important Implementation Details
 - **FsNode Creation**: Use `new_file_node_with_persistence()` helper for creating and persisting file nodes
 - **Directory Structure**: Metadata stored in `{data_dir}/metadata/`, content files in `{data_dir}/`
-- **Mount Points**: Default to `$XDG_DATA_HOME/pfs` or `$HOME/.local/share/pfs`
+- **Mount Points**: Default to `$HOME/Orbit` (automatically created)
 - **Persistence**: All FsNodes and Directory structures are automatically persisted to fjall database
 
 ## Code Patterns

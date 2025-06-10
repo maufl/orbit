@@ -15,7 +15,7 @@ cargo run --bin pfsd
 cargo test --test basics -- --test-threads=1
 ```
 
-The filesystem mounts at `$XDG_DATA_HOME/pfs` (or `$HOME/.local/share/pfs`) with data stored in `$XDG_DATA_HOME/pfs_data`.
+The filesystem mounts at `$HOME/Orbit` with data stored in `$XDG_DATA_HOME/pfs_data` (or `$HOME/.local/share/pfs_data`).
 
 ## AI disclaimer
 I was/am and skeptic, but I started using Claude Code for this and it's really helpful.
