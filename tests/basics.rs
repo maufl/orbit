@@ -335,6 +335,7 @@ fn rename_file_to_different_directory() {
 
 #[test]
 fn test_persistence_infrastructure() {
+    let _ = simple_logger::init();
     let uuid = uuid::Uuid::new_v4();
     let mount_point = format!("/tmp/{}/pfs", uuid);
     let data_dir = format!("/tmp/{}/pfs_data", uuid);
@@ -411,8 +412,24 @@ fn test_persistence_infrastructure() {
         let guard = fuser::spawn_mount2(fs, &mount_point, &vec![]).unwrap();
         thread::sleep(Duration::from_millis(100));
 
-        // Even though filesystem state restoration is not fully implemented,
-        // we can verify the filesystem starts up correctly with existing metadata
+        // Verify all original files are present after restart
+        for (filename, expected_content) in &test_files {
+            let file_path = format!("{}/{}", mount_point, filename);
+            let content = fs::read_to_string(&file_path)
+                .expect(&format!("To read restored file: {}", filename));
+            assert_eq!(
+                content, *expected_content,
+                "File {} content should be restored",
+                filename
+            );
+        }
+
+        // Verify original directory exists after restart
+        let dir_path = format!("{}/{}", mount_point, test_dir);
+        assert!(
+            fs::metadata(&dir_path).unwrap().is_dir(),
+            "Directory should be restored"
+        );
 
         // Create a new file to verify the filesystem is functional
         let new_file_path = format!("{}/new_after_restart.txt", mount_point);

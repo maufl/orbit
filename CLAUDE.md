@@ -14,6 +14,7 @@
 ## Development Practices
 - **Formatting**: Always run `rustfmt` on `.rs` files after making changes
 - **Testing**: Run integration tests with `cargo test --test basics -- --test-threads=1` (single-threaded for FUSE compatibility)
+- **Persistence Testing**: `test_persistence_infrastructure` now verifies full file/directory restoration across filesystem restarts
 - **Error Handling**: Database initialization failures should cause early failure, not silent degradation
 - **Code Quality**: Prefer helper functions over duplicated logic (e.g., `new_file_node_with_persistence`)
 
@@ -22,9 +23,16 @@
 - **Directory Structure**: Metadata stored in `{data_dir}/metadata/`, content files in `{data_dir}/`
 - **Mount Points**: Default to `$HOME/Orbit` (automatically created)
 - **Persistence**: All FsNodes and Directory structures are automatically persisted to fjall database
+- **Root Hash Storage**: Root FsNodeHash stored in KV store under special key `__ROOT_HASH__`
+- **Metadata Restoration**: Full recursive restoration of filesystem tree from KV store on startup
+- **Root Node Management**: Use `update_root_node()` helper to update root and persist its hash
+- **Stack Overflow Fix**: Removed inodes[1] synchronization from update_root_node to prevent infinite recursion
 
 ## Code Patterns
 - Prefer editing existing files over creating new ones
 - Use `TodoWrite`/`TodoRead` tools for tracking complex multi-step tasks
 - Handle fjall database errors by logging and continuing (for persistence operations)
 - Use proper error propagation in initialization functions
+- Eliminate code duplication by extracting common patterns into helper functions
+- Mutate loaded data structures instead of creating copies when possible
+- Maintain consistency between `root_node` field and `inodes[1]` for root directory

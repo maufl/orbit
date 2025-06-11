@@ -30,7 +30,7 @@ fn calculate_hash<T: Serialize>(v: &T) -> [u8; 32] {
     hmac_sha256::Hash::hash(&buffer)
 }
 
-#[derive(Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
 enum FileType {
     #[default]
     Directory,
@@ -48,7 +48,7 @@ struct FsNode {
     content_hash: ContentHash,
     /// Kind of file
     kind: FileType,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, skip_deserializing)]
     parent_inode_number: Option<InodeNumber>,
 }
 
@@ -119,14 +119,14 @@ impl FsNode {
 struct DirectoryEntry {
     name: String,
     fs_node_hash: FsNodeHash,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, skip_deserializing)]
     inode_number: InodeNumber,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone)]
 struct Directory {
     entries: Vec<DirectoryEntry>,
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, skip_deserializing)]
     parent_inode_number: Option<InodeNumber>,
 }
 
@@ -144,12 +144,12 @@ struct OpenFile {
 }
 
 pub struct Pfs {
-    root_node: FsNode,
     directories: BTreeMap<ContentHash, Directory>,
     data_dir: String,
     inodes: Vec<FsNode>,
     open_files: Vec<Option<OpenFile>>,
-    kv_store: Keyspace,
+    /// This field may not be removed! It looks unused, but if you drop the Keyspace fjall will stop working
+    keyspace: Keyspace,
     fs_nodes_partition: PartitionHandle,
     directories_partition: PartitionHandle,
 }
@@ -165,51 +165,28 @@ impl Pfs {
 
         let mut pfs = Pfs {
             data_dir: data_dir.clone(),
-            root_node: FsNode::default(),
             directories: BTreeMap::new(),
             inodes: vec![FsNode::default(); 1],
             open_files: Vec::new(),
-            kv_store: keyspace,
+            keyspace,
             fs_nodes_partition,
             directories_partition,
         };
 
         // Try to load existing data
-        if let Err(e) = pfs.load_persisted_data() {
+        if let Err(e) = pfs.restore_filesystem_tree() {
             warn!("Failed to load persisted data, starting fresh: {}", e);
             // Start fresh if loading fails
+            pfs.directories.clear();
+            pfs.inodes = vec![FsNode::default(); 1];
             let fs_node = pfs.new_directory_node(Directory::default(), None);
             pfs.assign_inode_number(fs_node.clone());
-            pfs.root_node = fs_node;
+            if let Err(e) = pfs.persist_root_hash(&fs_node.calculate_hash()) {
+                error!("Failed to persist root hash: {}", e);
+            }
         }
 
         Ok(pfs)
-    }
-
-    fn persist_fs_node(
-        &self,
-        node_hash: &FsNodeHash,
-        fs_node: &FsNode,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let key = node_hash.0;
-        let mut value = Vec::new();
-        ciborium::into_writer(fs_node, &mut value)?;
-        self.fs_nodes_partition.insert(&key, &value)?;
-        debug!("Persisted FsNode with hash {:?}", node_hash);
-        Ok(())
-    }
-
-    fn persist_directory(
-        &self,
-        content_hash: &ContentHash,
-        directory: &Directory,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let key = content_hash.0;
-        let mut value = Vec::new();
-        ciborium::into_writer(directory, &mut value)?;
-        self.directories_partition.insert(&key, &value)?;
-        debug!("Persisted Directory with content hash {:?}", content_hash);
-        Ok(())
     }
 
     fn load_fs_node(
@@ -234,26 +211,100 @@ impl Pfs {
         Ok(None)
     }
 
-    fn load_persisted_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // For this test, we'll implement a basic loading mechanism
-        // In a full implementation, this would reconstruct the entire filesystem state
+    fn restore_filesystem_tree(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Load the root hash first
+        let key = b"__ROOT_HASH__";
+        let Some(value) = self.fs_nodes_partition.get(key)? else {
+            return Err("No root hash found in metadata".into());
+        };
+        let root_hash = ciborium::from_reader(&*value)?;
+        info!("Found root hash {:?} in persistent storage", root_hash);
 
-        // Check if we have any persisted data by looking for the root directory
-        // If there's no data, start fresh
-        if self.directories_partition.is_empty()? {
-            let fs_node = self.new_directory_node(Directory::default(), None);
-            self.assign_inode_number(fs_node.clone());
-            self.root_node = fs_node;
-            return Ok(());
+        // Restore the filesystem tree recursively, starting from the root
+        let root_inode = self.restore_node_recursive(&root_hash, None)?;
+        info!("Restored root node to inode {:?}", root_inode);
+
+        info!(
+            "Successfully restored filesystem tree from persistent storage with {} inodes",
+            self.inodes.len()
+        );
+        Ok(())
+    }
+
+    fn restore_node_recursive(
+        &mut self,
+        fs_node_hash: &FsNodeHash,
+        parent_inode_number: Option<InodeNumber>,
+    ) -> Result<InodeNumber, Box<dyn std::error::Error>> {
+        let Some(mut fs_node) = self.load_fs_node(fs_node_hash)? else {
+            return Err(format!("Unable to load fs node with hash {:?}", fs_node_hash).into());
+        };
+        fs_node.parent_inode_number = parent_inode_number;
+        let inode_number = self.assign_inode_number(fs_node);
+        debug!(
+            "Restored fs_node with hash {:?} to inode {:?}, type: {:?}",
+            fs_node_hash, inode_number, fs_node.kind
+        );
+        if let FileType::Directory = fs_node.kind {
+            // Load the directory structure
+            if let Some(mut directory) = self.load_directory(&fs_node.content_hash)? {
+                debug!("Loading directory with {} entries", directory.entries.len());
+                // Update the parent inode number
+                directory.parent_inode_number = parent_inode_number;
+
+                // Restore each entry in the directory, updating with correct inode numbers
+                for entry in &mut directory.entries {
+                    debug!("Restoring directory entry: {}", entry.name);
+                    let child_inode_number =
+                        self.restore_node_recursive(&entry.fs_node_hash, Some(inode_number))?;
+                    // Update the entry with the correct inode number
+                    entry.inode_number = child_inode_number;
+                }
+
+                // Store the updated directory
+                self.directories.insert(fs_node.content_hash, directory);
+            } else {
+                warn!(
+                    "Directory content not found for FsNode with hash {:?}",
+                    fs_node.content_hash
+                );
+            }
         }
+        Ok(inode_number)
+    }
 
-        // For the test, we'll just create a fresh root if persistence exists
-        // A complete implementation would reconstruct the full filesystem tree
-        let fs_node = self.new_directory_node(Directory::default(), None);
-        self.assign_inode_number(fs_node.clone());
-        self.root_node = fs_node;
+    fn persist_fs_node(
+        &self,
+        node_hash: &FsNodeHash,
+        fs_node: &FsNode,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let key = node_hash.0;
+        let mut value = Vec::new();
+        ciborium::into_writer(fs_node, &mut value)?;
+        self.fs_nodes_partition.insert(&key, &value)?;
+        debug!("Persisted FsNode with hash {:?}", node_hash);
+        Ok(())
+    }
 
-        debug!("Loaded persisted filesystem metadata");
+    fn persist_root_hash(&self, root_hash: &FsNodeHash) -> Result<(), Box<dyn std::error::Error>> {
+        let key = b"__ROOT_HASH__";
+        let mut value = Vec::new();
+        ciborium::into_writer(root_hash, &mut value)?;
+        self.fs_nodes_partition.insert(key, &value)?;
+        debug!("Persisted root hash {:?}", root_hash);
+        Ok(())
+    }
+
+    fn persist_directory(
+        &self,
+        content_hash: &ContentHash,
+        directory: &Directory,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let key = content_hash.0;
+        let mut value = Vec::new();
+        ciborium::into_writer(directory, &mut value)?;
+        self.directories_partition.insert(&key, &value)?;
+        debug!("Persisted Directory with content hash {:?}", content_hash);
         Ok(())
     }
 
@@ -317,7 +368,10 @@ impl Pfs {
                 new_directory_node.calculate_hash(),
             );
         } else {
-            self.root_node = new_directory_node;
+            // This is the root directory - persist the root hash
+            if let Err(e) = self.persist_root_hash(&new_directory_node.calculate_hash()) {
+                error!("Failed to persist root hash: {}", e);
+            }
         }
     }
 
@@ -351,7 +405,10 @@ impl Pfs {
                 new_directory_node.calculate_hash(),
             );
         } else {
-            self.root_node = new_directory_node;
+            // This is the root directory - persist the root hash
+            if let Err(e) = self.persist_root_hash(&new_directory_node.calculate_hash()) {
+                error!("Failed to persist root hash: {}", e);
+            }
         }
         Ok(())
     }
@@ -383,7 +440,10 @@ impl Pfs {
                 new_directory_node.calculate_hash(),
             );
         } else {
-            self.root_node = new_directory_node;
+            // This is the root directory - persist the root hash
+            if let Err(e) = self.persist_root_hash(&new_directory_node.calculate_hash()) {
+                error!("Failed to persist root hash: {}", e);
+            }
         };
     }
 
@@ -402,6 +462,14 @@ impl Pfs {
     }
 }
 
+impl Drop for Pfs {
+    fn drop(&mut self) {
+        self.keyspace
+            .persist(fjall::PersistMode::SyncAll)
+            .expect("To be able to persist metadata")
+    }
+}
+
 impl Filesystem for Pfs {
     fn getattr(
         &mut self,
@@ -412,7 +480,13 @@ impl Filesystem for Pfs {
     ) {
         debug!("Called getattr with ino: {} fh: {:?}", ino, fh);
         let ttl = Duration::from_millis(1);
-        let fs_node = self.inodes.get(ino as usize).unwrap();
+
+        let Some(fs_node) = self.inodes.get(ino as usize) else {
+            error!("No inode found for ino: {}", ino);
+            reply.error(libc::ENOENT);
+            return;
+        };
+
         let attrs = fs_node.as_file_attr(InodeNumber(ino));
         debug!("Attrs are {:?}", attrs);
         reply.attr(&ttl, &attrs);
@@ -439,10 +513,6 @@ impl Filesystem for Pfs {
             reply.add(1, 1, fuser::FileType::Directory, "..");
             let mut offset = 2;
             for entry in directory.entries.iter() {
-                info!(
-                    "Dir entry with name {} and ino {}",
-                    &entry.name, entry.inode_number.0
-                );
                 reply.add(
                     entry.inode_number.0 as u64,
                     offset,
