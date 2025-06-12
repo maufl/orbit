@@ -2,10 +2,13 @@ use std::env;
 
 use pfs::Pfs;
 
-use log::info;
+use log::{info, LevelFilter};
 
 fn main() {
-    simple_logger::init().unwrap();
+    env_logger::Builder::from_default_env()
+        .filter(None, LevelFilter::Warn)
+        .filter(Some("pfs"), LevelFilter::Debug)
+        .init();
     let Ok(home) = env::var("HOME") else {
         println!("$HOME must be set");
         return;

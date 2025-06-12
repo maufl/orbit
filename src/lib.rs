@@ -478,7 +478,6 @@ impl Filesystem for Pfs {
         fh: Option<u64>,
         reply: fuser::ReplyAttr,
     ) {
-        debug!("Called getattr with ino: {} fh: {:?}", ino, fh);
         let ttl = Duration::from_millis(1);
 
         let Some(fs_node) = self.inodes.get(ino as usize) else {
@@ -488,7 +487,6 @@ impl Filesystem for Pfs {
         };
 
         let attrs = fs_node.as_file_attr(InodeNumber(ino));
-        debug!("Attrs are {:?}", attrs);
         reply.attr(&ttl, &attrs);
     }
 
@@ -500,10 +498,6 @@ impl Filesystem for Pfs {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        debug!(
-            "Called readdir with ino: {} fh: {} offset: {}",
-            ino, fh, offset
-        );
         let (_fs_node, directory) = match self.get_directory(ino) {
             Ok(v) => v,
             Err(e) => return reply.error(e),
