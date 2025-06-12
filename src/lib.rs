@@ -654,7 +654,7 @@ impl Filesystem for Pfs {
         let Some(Some(open_file)) = self.open_files.get_mut(fh as usize) else {
             return reply.error(libc::ENOENT);
         };
-        let _ = open_file.backing_file.seek(SeekFrom::Current(offset));
+        let _ = open_file.backing_file.seek(SeekFrom::Start(offset as u64));
         let mut buf = vec![0u8; size as usize];
         let _ = open_file.backing_file.read(&mut buf);
         reply.data(&buf);

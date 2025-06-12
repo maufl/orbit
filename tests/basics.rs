@@ -203,7 +203,7 @@ fn write_large_file() {
     thread::sleep(Duration::from_millis(100));
 
     let file_path = format!("{}/large_file.txt", mount_point);
-    let large_content = "x".repeat(10000); // 10KB file
+    let large_content = "x".repeat(200_000); // 200KB file
 
     // Create large file
     {
@@ -217,7 +217,7 @@ fn write_large_file() {
     // Read and verify large file
     let content = fs::read_to_string(&file_path).expect("To read large file");
     assert_eq!(content, large_content);
-    assert_eq!(content.len(), 10000);
+    assert_eq!(content.len(), 200_000);
 
     drop(guard);
 }
