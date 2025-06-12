@@ -335,7 +335,6 @@ fn rename_file_to_different_directory() {
 
 #[test]
 fn test_persistence_infrastructure() {
-    let _ = simple_logger::init();
     let uuid = uuid::Uuid::new_v4();
     let mount_point = format!("/tmp/{}/pfs", uuid);
     let data_dir = format!("/tmp/{}/pfs_data", uuid);
