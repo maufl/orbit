@@ -498,19 +498,29 @@ impl Filesystem for Pfs {
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        let (_fs_node, directory) = match self.get_directory(ino) {
+        let (fs_node, directory) = match self.get_directory(ino) {
             Ok(v) => v,
             Err(e) => return reply.error(e),
         };
         if offset == 0 {
-            let _ = reply.add(1, 0, fuser::FileType::Directory, ".");
-            let _ = reply.add(1, 1, fuser::FileType::Directory, "..");
+            let _ = reply.add(1, ino as i64, fuser::FileType::Directory, ".");
+            let _ = reply.add(
+                1,
+                fs_node.parent_inode_number.map(|i| i.0).unwrap_or(ino) as i64,
+                fuser::FileType::Directory,
+                "..",
+            );
             let mut offset = 2;
             for entry in directory.entries.iter() {
+                let fs_node = self.inodes[entry.inode_number.0 as usize];
                 let _ = reply.add(
                     entry.inode_number.0 as u64,
                     offset,
-                    fuser::FileType::RegularFile,
+                    if let FileType::Directory = fs_node.kind {
+                        fuser::FileType::Directory
+                    } else {
+                        fuser::FileType::RegularFile
+                    },
                     &entry.name,
                 );
                 offset += 1;
