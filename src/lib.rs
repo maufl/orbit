@@ -475,7 +475,7 @@ impl Filesystem for Pfs {
         &mut self,
         _req: &fuser::Request<'_>,
         ino: u64,
-        fh: Option<u64>,
+        _fh: Option<u64>,
         reply: fuser::ReplyAttr,
     ) {
         let ttl = Duration::from_millis(1);
@@ -494,7 +494,7 @@ impl Filesystem for Pfs {
         &mut self,
         _req: &fuser::Request<'_>,
         ino: u64,
-        fh: u64,
+        _fh: u64,
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
@@ -503,11 +503,11 @@ impl Filesystem for Pfs {
             Err(e) => return reply.error(e),
         };
         if offset == 0 {
-            reply.add(1, 0, fuser::FileType::Directory, ".");
-            reply.add(1, 1, fuser::FileType::Directory, "..");
+            let _ = reply.add(1, 0, fuser::FileType::Directory, ".");
+            let _ = reply.add(1, 1, fuser::FileType::Directory, "..");
             let mut offset = 2;
             for entry in directory.entries.iter() {
-                reply.add(
+                let _ = reply.add(
                     entry.inode_number.0 as u64,
                     offset,
                     fuser::FileType::RegularFile,
@@ -524,8 +524,8 @@ impl Filesystem for Pfs {
         _req: &fuser::Request<'_>,
         parent: u64,
         name: &std::ffi::OsStr,
-        mode: u32,
-        umask: u32,
+        _mode: u32,
+        _umask: u32,
         reply: fuser::ReplyEntry,
     ) {
         match self.get_directory(parent) {
@@ -636,27 +636,27 @@ impl Filesystem for Pfs {
             ino, fh, offset, write_flags, flags, lock_owner
         );
         let open_file = self.open_files[fh as usize].as_mut().unwrap();
-        open_file.backing_file.write_at(data, offset as u64);
+        let _ = open_file.backing_file.write_at(data, offset as u64);
         reply.written(data.len() as u32);
     }
 
     fn read(
         &mut self,
         _req: &fuser::Request<'_>,
-        ino: u64,
+        _ino: u64,
         fh: u64,
         offset: i64,
         size: u32,
-        flags: i32,
-        lock_owner: Option<u64>,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
         let Some(Some(open_file)) = self.open_files.get_mut(fh as usize) else {
             return reply.error(libc::ENOENT);
         };
-        open_file.backing_file.seek(SeekFrom::Current(offset));
+        let _ = open_file.backing_file.seek(SeekFrom::Current(offset));
         let mut buf = vec![0u8; size as usize];
-        open_file.backing_file.read(&mut buf);
+        let _ = open_file.backing_file.read(&mut buf);
         reply.data(&buf);
     }
 
@@ -689,7 +689,7 @@ impl Filesystem for Pfs {
             hasher.update(&buf[..n]);
             size += n as u64;
         }
-        drop(fd);
+        let _ = fd;
         let content_hash = ContentHash(hasher.finalize());
         let new_file_path = self.data_dir.clone()
             + "/"
@@ -823,7 +823,7 @@ impl Filesystem for Pfs {
         };
 
         // Verify the destination directory exists
-        let (dest_fs_node, dest_directory) = match self.get_directory(newparent) {
+        let (_dest_fs_node, dest_directory) = match self.get_directory(newparent) {
             Ok(v) => v,
             Err(e) => return reply.error(e),
         };
