@@ -364,7 +364,7 @@ impl Pfs {
     ) -> Result<(), i32> {
         let (directory_node, mut directory) = self.get_directory(inode_number.0)?;
         directory.entries.push(new_entry);
-        self.update_directory(inode_number, &directory_node, directory);
+        self.update_directory(inode_number, &directory_node, directory)?;
         Ok(())
     }
 
@@ -386,7 +386,7 @@ impl Pfs {
             }
             None => return Err(libc::ENOENT),
         }
-        self.update_directory(inode_number, &directory_node, directory);
+        self.update_directory(inode_number, &directory_node, directory)?;
         Ok(())
     }
 
@@ -402,7 +402,7 @@ impl Pfs {
                 entry.fs_node_hash = new_entry_fs_node_hash;
             }
         }
-        self.update_directory(inode_number, &directory_node, directory);
+        self.update_directory(inode_number, &directory_node, directory)?;
         Ok(())
     }
 
@@ -411,7 +411,7 @@ impl Pfs {
         inode_number: InodeNumber,
         old_directory_node: &FsNode,
         new_directory: Directory,
-    ) {
+    ) -> Result<(), i32> {
         let new_directory_node =
             self.new_directory_node(new_directory, old_directory_node.parent_inode_number);
         self.inodes[inode_number.0 as usize] = new_directory_node;
@@ -420,7 +420,7 @@ impl Pfs {
                 parent_inode,
                 &old_directory_node.calculate_hash(),
                 new_directory_node.calculate_hash(),
-            );
+            )?;
         } else {
             let root_hash = new_directory_node.calculate_hash();
             // This is the root directory - persist the root hash
@@ -428,9 +428,10 @@ impl Pfs {
                 error!("Failed to persist root hash: {}", e);
             }
             if let Some(ref mut sender) = self.root_node_hash_sender {
-                sender.blocking_send(root_hash);
+                let _ = sender.blocking_send(root_hash);
             }
         };
+        Ok(())
     }
 
     fn get_directory(&self, inode_number: u64) -> Result<(FsNode, Directory), i32> {
@@ -530,14 +531,16 @@ impl Filesystem for Pfs {
         };
         let fs_node = self.new_directory_node(Directory::default(), Some(InodeNumber(parent)));
         let inode_number = self.assign_inode_number(fs_node);
-        self.add_directory_entry(
+        if let Err(error) = self.add_directory_entry(
             InodeNumber(parent),
             DirectoryEntry {
                 name: name.to_str().unwrap().to_owned(),
                 fs_node_hash: fs_node.calculate_hash(),
                 inode_number,
             },
-        );
+        ) {
+            return reply.error(error);
+        };
         reply.entry(
             &Duration::from_millis(1),
             &fs_node.as_file_attr(inode_number),
@@ -574,14 +577,16 @@ impl Filesystem for Pfs {
             writable: (flags & O_WRONLY > 0) || (flags & O_RDWR > 0),
         };
         self.open_files.push(Some(open_file));
-        self.add_directory_entry(
+        if let Err(error) = self.add_directory_entry(
             InodeNumber(parent),
             DirectoryEntry {
                 name: name.to_str().unwrap().to_owned(),
                 fs_node_hash: fs_node.calculate_hash(),
                 inode_number,
             },
-        );
+        ) {
+            return reply.error(error);
+        };
         reply.created(
             &Duration::from_secs(60),
             &fs_node.as_file_attr(inode_number),
@@ -700,11 +705,13 @@ impl Filesystem for Pfs {
         let new_fs_node =
             self.new_file_node_with_persistence(content_hash, size, Some(InodeNumber(_ino)));
 
-        self.update_directory_entry(
+        if let Err(error) = self.update_directory_entry(
             open_file.parent_inode_number,
             &old_fs_node.calculate_hash(),
             new_fs_node.calculate_hash(),
-        );
+        ) {
+            return reply.error(error);
+        };
         self.inodes[_ino as usize] = new_fs_node;
         reply.ok()
     }
@@ -854,7 +861,9 @@ impl Filesystem for Pfs {
             fs_node_hash: source_entry.fs_node_hash,
             inode_number: source_entry.inode_number,
         };
-        self.add_directory_entry(InodeNumber(newparent), new_entry);
+        if let Err(error) = self.add_directory_entry(InodeNumber(newparent), new_entry) {
+            return reply.error(error);
+        }
 
         // Remove the entry from the source directory (second)
         if let Err(error) = self.remove_directory_entry(InodeNumber(parent), old_name) {

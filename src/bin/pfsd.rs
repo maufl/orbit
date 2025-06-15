@@ -1,7 +1,5 @@
-use std::io::Read;
 use std::{env, thread};
 use std::num::ParseIntError;
-use std::io::Write;
 
 use bytes::{BufMut, BytesMut};
 use iroh::endpoint::Connection;
@@ -35,18 +33,17 @@ async fn main() -> Result<(), anyhow::Error> {
     let conn = endpoint.connect(node_addr, APLN.as_bytes()).await?;
 
     thread::spawn(move || run_fs(sender));
-    forward_root_hash(conn
-                      , receiver).await;
+    let _ = forward_root_hash(conn, receiver).await;
     Ok(())
 }
 
 async fn forward_root_hash(conn: Connection, mut recv: Receiver<FsNodeHash>) -> Result<(), anyhow::Error> {
-    let (mut net_sender, net_receiver) = conn.open_bi().await?;
+    let (mut net_sender, _net_receiver) = conn.open_bi().await?;
     while let Some(hash) = recv.recv().await {
         let msg = Messages::RootHashChanged(hash.0);
         let mut datagram = BytesMut::new().writer();
         ciborium::into_writer(&msg, &mut datagram).expect("To be able to serialize the message");
-        net_sender.write_chunk(datagram.into_inner().freeze()).await;
+        let _ = net_sender.write_chunk(datagram.into_inner().freeze()).await;
     };
     Ok(())
 }
