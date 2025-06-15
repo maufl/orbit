@@ -19,8 +19,20 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
         .collect()
 }
 
+fn initialize_pfs(net_sender: Sender<FsNodeHash>) -> Pfs {
+    let data_home = env::var("XDG_DATA_HOME").or(env::var("HOME").map(|h| h + "/.local/share")).expect("Either XDG_DATA_HOME or HOME must be set");
+    let data_dir = data_home + "/pfs_data";
+    std::fs::create_dir_all(&data_dir).expect("To create the data dir");
+    std::fs::create_dir_all(data_dir.clone() + "/tmp").expect("To create the temporary file dir");
+    Pfs::initialize(data_dir, Some(net_sender)).expect("Failed to initialize filesystem")
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    env_logger::Builder::from_default_env()
+        .filter(None, LevelFilter::Warn)
+        .filter(Some("pfs"), LevelFilter::Debug)
+        .init();
     let args: Vec<String> = env::args().collect();
     let remote_node_id = decode_hex(&args[1])?;
     let mut remote_pub_key = [0u8; 32];
@@ -32,12 +44,18 @@ async fn main() -> Result<(), anyhow::Error> {
     let (sender, receiver) = tokio::sync::mpsc::channel(10);
     let conn = endpoint.connect(node_addr, APLN.as_bytes()).await?;
 
-    thread::spawn(move || run_fs(sender));
-    let _ = forward_root_hash(conn, receiver).await;
+    let pfs = initialize_pfs(sender);
+    {
+        let pfs = pfs.clone();
+        thread::spawn(move || {
+            run_fs(pfs);
+        });
+    }
+    let _ = forward_root_hash(conn, receiver, pfs).await;
     Ok(())
 }
 
-async fn forward_root_hash(conn: Connection, mut recv: Receiver<FsNodeHash>) -> Result<(), anyhow::Error> {
+async fn forward_root_hash(conn: Connection, mut recv: Receiver<FsNodeHash>, pfs: Pfs) -> Result<(), anyhow::Error> {
     let (mut net_sender, _net_receiver) = conn.open_bi().await?;
     while let Some(hash) = recv.recv().await {
         let msg = Messages::RootHashChanged(hash.0);
@@ -50,26 +68,13 @@ async fn forward_root_hash(conn: Connection, mut recv: Receiver<FsNodeHash>) -> 
 
 
 
-fn run_fs(sender: Sender<FsNodeHash>) {
-    env_logger::Builder::from_default_env()
-        .filter(None, LevelFilter::Warn)
-        .filter(Some("pfs"), LevelFilter::Debug)
-        .init();
+fn run_fs(fs: Pfs) {
     let Ok(home) = env::var("HOME") else {
         println!("$HOME must be set");
         return;
     };
-    let Ok(data_home) = env::var("XDG_DATA_HOME").or(env::var("HOME").map(|h| h + "/.local/share"))
-    else {
-        println!("Either $XDG_DATA_HOME or $HOME must be set");
-        return;
-    };
     let mount_point = home + "/Orbit";
-    let data_dir = data_home + "/pfs_data";
     std::fs::create_dir_all(&mount_point).expect("To create the mount point");
-    std::fs::create_dir_all(&data_dir).expect("To create the data dir");
-    std::fs::create_dir_all(data_dir.clone() + "/tmp").expect("To create the temporary file dir");
-    let fs = Pfs::initialize(data_dir, Some(sender)).expect("Failed to initialize filesystem");
     info!("Mounting to {}", mount_point);
     let (send, recv) = std::sync::mpsc::channel();
     let send_ctrlc = send.clone();
