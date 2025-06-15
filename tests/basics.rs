@@ -11,7 +11,7 @@ fn setup() -> (BackgroundSession, String) {
     let data_dir = format!("/tmp/{}/pfs_data", uuid);
     std::fs::create_dir_all(&mount_point).expect("To create the mount point");
     std::fs::create_dir_all(&data_dir).expect("To create the data dir");
-    let fs = Pfs::initialize(data_dir).expect("Failed to initialize filesystem");
+    let fs = Pfs::initialize(data_dir, None).expect("Failed to initialize filesystem");
     let guard = fuser::spawn_mount2(fs, &mount_point, &vec![]).unwrap();
     (guard, mount_point)
 }
@@ -351,7 +351,7 @@ fn test_persistence_infrastructure() {
 
     // First filesystem session - create files and directories
     {
-        let fs = Pfs::initialize(data_dir.clone()).expect("Failed to initialize filesystem");
+        let fs = Pfs::initialize(data_dir.clone(), None).expect("Failed to initialize filesystem");
         let guard = fuser::spawn_mount2(fs, &mount_point, &vec![]).unwrap();
         thread::sleep(Duration::from_millis(100));
 
@@ -407,7 +407,7 @@ fn test_persistence_infrastructure() {
 
     // Second filesystem session - verify the persistence infrastructure works
     {
-        let fs = Pfs::initialize(data_dir.clone()).expect("Failed to initialize filesystem");
+        let fs = Pfs::initialize(data_dir.clone(), None).expect("Failed to initialize filesystem");
         let guard = fuser::spawn_mount2(fs, &mount_point, &vec![]).unwrap();
         thread::sleep(Duration::from_millis(100));
 
