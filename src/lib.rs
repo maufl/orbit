@@ -357,30 +357,15 @@ impl Pfs {
         fs_node
     }
 
-    fn add_directory_entry(&mut self, inode_number: InodeNumber, new_entry: DirectoryEntry) {
-        let directory_node = self.inodes.get(inode_number.0 as usize).unwrap().clone();
-        let mut directory = self
-            .directories
-            .get(&directory_node.content_hash)
-            .unwrap()
-            .clone();
+    fn add_directory_entry(
+        &mut self,
+        inode_number: InodeNumber,
+        new_entry: DirectoryEntry,
+    ) -> Result<(), i32> {
+        let (directory_node, mut directory) = self.get_directory(inode_number.0)?;
         directory.entries.push(new_entry);
-        let parent_inode_number = directory.parent_inode_number;
-        let new_directory_node =
-            self.new_directory_node(directory, directory_node.parent_inode_number);
-        self.inodes[inode_number.0 as usize] = new_directory_node;
-        if let Some(parent_inode_number) = parent_inode_number {
-            self.update_directory_entry(
-                parent_inode_number,
-                &directory_node.calculate_hash(),
-                new_directory_node.calculate_hash(),
-            );
-        } else {
-            // This is the root directory - persist the root hash
-            if let Err(e) = self.persist_root_hash(&new_directory_node.calculate_hash()) {
-                error!("Failed to persist root hash: {}", e);
-            }
-        }
+        self.update_directory(inode_number, &directory_node, directory);
+        Ok(())
     }
 
     fn remove_directory_entry(
@@ -401,23 +386,7 @@ impl Pfs {
             }
             None => return Err(libc::ENOENT),
         }
-
-        let parent_inode_number = directory.parent_inode_number;
-        let new_directory_node =
-            self.new_directory_node(directory, directory_node.parent_inode_number);
-        self.inodes[inode_number.0 as usize] = new_directory_node;
-        if let Some(parent_inode_number) = parent_inode_number {
-            self.update_directory_entry(
-                parent_inode_number,
-                &directory_node.calculate_hash(),
-                new_directory_node.calculate_hash(),
-            );
-        } else {
-            // This is the root directory - persist the root hash
-            if let Err(e) = self.persist_root_hash(&new_directory_node.calculate_hash()) {
-                error!("Failed to persist root hash: {}", e);
-            }
-        }
+        self.update_directory(inode_number, &directory_node, directory);
         Ok(())
     }
 
@@ -426,31 +395,40 @@ impl Pfs {
         inode_number: InodeNumber,
         old_entry_hash: &FsNodeHash,
         new_entry_fs_node_hash: FsNodeHash,
-    ) {
-        let directory_node = self.inodes.get(inode_number.0 as usize).unwrap().clone();
-        let mut directory = self
-            .directories
-            .get(&directory_node.content_hash)
-            .unwrap()
-            .clone();
+    ) -> Result<(), i32> {
+        let (directory_node, mut directory) = self.get_directory(inode_number.0)?;
         for entry in directory.entries.iter_mut() {
             if &entry.fs_node_hash == old_entry_hash {
                 entry.fs_node_hash = new_entry_fs_node_hash;
             }
         }
+        self.update_directory(inode_number, &directory_node, directory);
+        Ok(())
+    }
+
+    fn update_directory(
+        &mut self,
+        inode_number: InodeNumber,
+        old_directory_node: &FsNode,
+        new_directory: Directory,
+    ) {
         let new_directory_node =
-            self.new_directory_node(directory, directory_node.parent_inode_number);
+            self.new_directory_node(new_directory, old_directory_node.parent_inode_number);
         self.inodes[inode_number.0 as usize] = new_directory_node;
-        if let Some(parent_inode) = directory_node.parent_inode_number {
+        if let Some(parent_inode) = old_directory_node.parent_inode_number {
             self.update_directory_entry(
                 parent_inode,
-                &directory_node.calculate_hash(),
+                &old_directory_node.calculate_hash(),
                 new_directory_node.calculate_hash(),
             );
         } else {
+            let root_hash = new_directory_node.calculate_hash();
             // This is the root directory - persist the root hash
             if let Err(e) = self.persist_root_hash(&new_directory_node.calculate_hash()) {
                 error!("Failed to persist root hash: {}", e);
+            }
+            if let Some(ref mut sender) = self.root_node_hash_sender {
+                sender.blocking_send(root_hash);
             }
         };
     }
