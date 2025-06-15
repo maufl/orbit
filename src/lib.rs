@@ -14,12 +14,15 @@ use fuser::{FileAttr, Filesystem};
 use libc::{O_RDWR, O_WRONLY};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::Sender;
+
+pub mod network;
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
 struct ContentHash([u8; 32]);
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
-struct FsNodeHash([u8; 32]);
+pub struct FsNodeHash(pub [u8; 32]);
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
 struct InodeNumber(u64);
@@ -152,10 +155,14 @@ pub struct Pfs {
     keyspace: Keyspace,
     fs_nodes_partition: PartitionHandle,
     directories_partition: PartitionHandle,
+    root_node_hash_sender: Option<Sender<FsNodeHash>>,
 }
 
 impl Pfs {
-    pub fn initialize(data_dir: String) -> Result<Pfs, Box<dyn std::error::Error>> {
+    pub fn initialize(
+        data_dir: String,
+        root_node_hash_sender: Option<Sender<FsNodeHash>>,
+    ) -> Result<Pfs, Box<dyn std::error::Error>> {
         let kv_path = format!("{}/metadata", data_dir);
         std::fs::create_dir_all(&kv_path)?;
 
@@ -171,6 +178,7 @@ impl Pfs {
             keyspace,
             fs_nodes_partition,
             directories_partition,
+            root_node_hash_sender,
         };
 
         // Try to load existing data
