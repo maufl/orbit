@@ -157,13 +157,13 @@ pub struct Pfs {
     keyspace: Keyspace,
     fs_nodes_partition: PartitionHandle,
     directories_partition: PartitionHandle,
-    root_node_hash_sender: Option<Sender<FsNodeHash>>,
+    root_node_hash_sender: Option<Sender<(FsNodeHash, FsNodeHash)>>,
 }
 
 impl Pfs {
     pub fn initialize(
         data_dir: String,
-        root_node_hash_sender: Option<Sender<FsNodeHash>>,
+        root_node_hash_sender: Option<Sender<(FsNodeHash, FsNodeHash)>>,
     ) -> Result<Pfs, Box<dyn std::error::Error>> {
         let kv_path = format!("{}/metadata", data_dir);
         std::fs::create_dir_all(&kv_path)?;
@@ -510,13 +510,14 @@ impl Pfs {
                 new_directory_node.calculate_hash(),
             )?;
         } else {
+            let old_root_hash = old_directory_node.calculate_hash();
             let root_hash = new_directory_node.calculate_hash();
             // This is the root directory - persist the root hash
             if let Err(e) = self.persist_root_hash(&new_directory_node.calculate_hash()) {
                 error!("Failed to persist root hash: {}", e);
             }
             if let Some(ref mut sender) = self.root_node_hash_sender {
-                let _ = sender.blocking_send(root_hash);
+                let _ = sender.blocking_send((old_root_hash, root_hash));
             }
         };
         Ok(())

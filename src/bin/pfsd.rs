@@ -19,7 +19,7 @@ pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
         .collect()
 }
 
-fn initialize_pfs(net_sender: Sender<FsNodeHash>) -> Pfs {
+fn initialize_pfs(net_sender: Sender<(FsNodeHash, FsNodeHash)>) -> Pfs {
     let data_home = env::var("XDG_DATA_HOME").or(env::var("HOME").map(|h| h + "/.local/share")).expect("Either XDG_DATA_HOME or HOME must be set");
     let data_dir = data_home + "/pfs_data";
     std::fs::create_dir_all(&data_dir).expect("To create the data dir");
@@ -55,10 +55,10 @@ async fn main() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn forward_root_hash(conn: Connection, mut recv: Receiver<FsNodeHash>, _pfs: Pfs) -> Result<(), anyhow::Error> {
+async fn forward_root_hash(conn: Connection, mut recv: Receiver<(FsNodeHash, FsNodeHash)>, _pfs: Pfs) -> Result<(), anyhow::Error> {
     let (mut net_sender, _net_receiver) = conn.open_bi().await?;
-    while let Some(hash) = recv.recv().await {
-        let msg = Messages::RootHashChanged(hash.0);
+    while let Some((_old_hash, new_hash)) = recv.recv().await {
+        let msg = Messages::RootHashChanged(new_hash.0);
         let mut datagram = BytesMut::new().writer();
         ciborium::into_writer(&msg, &mut datagram).expect("To be able to serialize the message");
         let _ = net_sender.write_chunk(datagram.into_inner().freeze()).await;
