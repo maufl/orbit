@@ -55,7 +55,7 @@ async fn main() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn forward_root_hash(conn: Connection, mut recv: Receiver<FsNodeHash>, pfs: Pfs) -> Result<(), anyhow::Error> {
+async fn forward_root_hash(conn: Connection, mut recv: Receiver<FsNodeHash>, _pfs: Pfs) -> Result<(), anyhow::Error> {
     let (mut net_sender, _net_receiver) = conn.open_bi().await?;
     while let Some(hash) = recv.recv().await {
         let msg = Messages::RootHashChanged(hash.0);

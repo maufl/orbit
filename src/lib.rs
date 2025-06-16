@@ -20,13 +20,13 @@ use tokio::sync::mpsc::Sender;
 pub mod network;
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
-struct ContentHash([u8; 32]);
+pub struct ContentHash([u8; 32]);
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
 pub struct FsNodeHash(pub [u8; 32]);
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
-struct InodeNumber(u64);
+pub struct InodeNumber(u64);
 
 fn calculate_hash<T: Serialize>(v: &T) -> [u8; 32] {
     let mut buffer = Vec::new();
@@ -35,25 +35,25 @@ fn calculate_hash<T: Serialize>(v: &T) -> [u8; 32] {
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
-enum FileType {
+pub enum FileType {
     #[default]
     Directory,
     RegularFile,
     Symlink,
 }
 
-#[derive(Default, Clone, Copy, Serialize, Deserialize)]
-struct FsNode {
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct FsNode {
     /// (recursive?) size in bytes
-    size: u64,
+    pub size: u64,
     /// Time of last change to the content
-    modification_time: DateTime<Utc>,
+    pub modification_time: DateTime<Utc>,
     /// The hash of the content, SHA256 probably
-    content_hash: ContentHash,
+    pub content_hash: ContentHash,
     /// Kind of file
-    kind: FileType,
+    pub kind: FileType,
     #[serde(skip_serializing, skip_deserializing)]
-    parent_inode_number: Option<InodeNumber>,
+    pub parent_inode_number: Option<InodeNumber>,
 }
 
 impl FsNode {
@@ -119,19 +119,19 @@ impl FsNode {
     }
 }
 
-#[derive(Default, Serialize, Deserialize, Clone)]
-struct DirectoryEntry {
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct DirectoryEntry {
     name: String,
     fs_node_hash: FsNodeHash,
     #[serde(skip_serializing, skip_deserializing)]
     inode_number: InodeNumber,
 }
 
-#[derive(Default, Serialize, Deserialize, Clone)]
-struct Directory {
-    entries: Vec<DirectoryEntry>,
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct Directory {
+    pub entries: Vec<DirectoryEntry>,
     #[serde(skip_serializing, skip_deserializing)]
-    parent_inode_number: Option<InodeNumber>,
+    pub parent_inode_number: Option<InodeNumber>,
 }
 
 impl Directory {
@@ -197,6 +197,86 @@ impl Pfs {
         }
 
         Ok(pfs)
+    }
+
+    pub fn get_root_node(&self) -> FsNode {
+        self.inodes.read().unwrap()[1]
+    }
+
+    pub fn diff(
+        &self,
+        old_root_node: &FsNode,
+        new_root_node: &FsNode,
+    ) -> (Vec<FsNode>, Vec<Directory>) {
+        let mut fs_nodes = Vec::new();
+        let mut directories = Vec::new();
+        self.diff_recursive(
+            old_root_node,
+            new_root_node,
+            &mut fs_nodes,
+            &mut directories,
+        );
+        (fs_nodes, directories)
+    }
+
+    fn diff_recursive(
+        &self,
+        old_dir_node: &FsNode,
+        new_dir_node: &FsNode,
+        fs_nodes: &mut Vec<FsNode>,
+        directories: &mut Vec<Directory>,
+    ) {
+        let current_dirs = self.directories.read().unwrap();
+        let old_directory = current_dirs
+            .get(&old_dir_node.content_hash)
+            .unwrap()
+            .clone();
+        let new_directory = current_dirs
+            .get(&new_dir_node.content_hash)
+            .unwrap()
+            .clone();
+        for entry in new_directory.entries.iter() {
+            if !old_directory.entries.iter().any(|e| e.name == entry.name) {
+                // New entry!
+                let new_fs_node = self.inodes.read().unwrap()[entry.inode_number.0 as usize];
+                if let FileType::Directory = new_fs_node.kind {
+                    // Simplification, we assume that directories will always be created empty and that we don't need to recurse
+                    let new_directory = self
+                        .directories
+                        .read()
+                        .unwrap()
+                        .get(&new_fs_node.content_hash)
+                        .unwrap()
+                        .clone();
+                    directories.push(new_directory);
+                }
+                fs_nodes.push(new_fs_node);
+            }
+            if old_directory
+                .entries
+                .iter()
+                .any(|e| e.name == entry.name && e.fs_node_hash != entry.fs_node_hash)
+            {
+                // Changed entry!
+                let changed_fs_node = self.inodes.read().unwrap()[entry.inode_number.0 as usize];
+                if let FileType::Directory = changed_fs_node.kind {
+                    let old_entry = old_directory
+                        .entries
+                        .iter()
+                        .find(|e| e.name == entry.name)
+                        .unwrap();
+                    let old_fs_node = self
+                        .load_fs_node(&old_entry.fs_node_hash)
+                        .expect("To find old FsNode")
+                        .unwrap();
+                    self.diff_recursive(&old_fs_node, &changed_fs_node, fs_nodes, directories);
+                } else {
+                    fs_nodes.push(changed_fs_node);
+                };
+            }
+        }
+        fs_nodes.push(new_dir_node.clone());
+        directories.push(new_directory);
     }
 
     fn load_fs_node(
