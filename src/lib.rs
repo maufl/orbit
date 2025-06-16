@@ -4,9 +4,11 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::FileExt,
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
+
+use parking_lot::RwLock;
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -147,12 +149,16 @@ struct OpenFile {
     writable: bool,
 }
 
+struct PfsRuntimeData {
+    directories: BTreeMap<ContentHash, Directory>,
+    inodes: Vec<FsNode>,
+    open_files: Vec<Option<OpenFile>>,
+}
+
 #[derive(Clone)]
 pub struct Pfs {
-    directories: Arc<RwLock<BTreeMap<ContentHash, Directory>>>,
+    runtime_data: Arc<RwLock<PfsRuntimeData>>,
     data_dir: String,
-    inodes: Arc<RwLock<Vec<FsNode>>>,
-    open_files: Arc<RwLock<Vec<Option<OpenFile>>>>,
     /// This field may not be removed! It looks unused, but if you drop the Keyspace fjall will stop working
     keyspace: Keyspace,
     fs_nodes_partition: PartitionHandle,
@@ -174,9 +180,11 @@ impl Pfs {
 
         let mut pfs = Pfs {
             data_dir: data_dir.clone(),
-            directories: Arc::new(RwLock::new(BTreeMap::new())),
-            inodes: Arc::new(RwLock::new(vec![FsNode::default(); 1])),
-            open_files: Arc::new(RwLock::new(Vec::new())),
+            runtime_data: Arc::new(RwLock::new(PfsRuntimeData {
+                directories: BTreeMap::new(),
+                inodes: vec![FsNode::default(); 1],
+                open_files: Vec::new(),
+            })),
             keyspace,
             fs_nodes_partition,
             directories_partition,
@@ -187,8 +195,11 @@ impl Pfs {
         if let Err(e) = pfs.restore_filesystem_tree() {
             warn!("Failed to load persisted data, starting fresh: {}", e);
             // Start fresh if loading fails
-            pfs.directories.write().unwrap().clear();
-            *pfs.inodes.write().unwrap() = vec![FsNode::default(); 1];
+            {
+                let mut runtime_data = pfs.runtime_data.write();
+                runtime_data.directories.clear();
+                runtime_data.inodes = vec![FsNode::default(); 1];
+            }
             let fs_node = pfs.new_directory_node(Directory::default(), None);
             pfs.assign_inode_number(fs_node.clone());
             if let Err(e) = pfs.persist_root_hash(&fs_node.calculate_hash()) {
@@ -200,7 +211,7 @@ impl Pfs {
     }
 
     pub fn get_root_node(&self) -> FsNode {
-        self.inodes.read().unwrap()[1]
+        self.runtime_data.read().inodes[1]
     }
 
     pub fn diff(
@@ -226,7 +237,8 @@ impl Pfs {
         fs_nodes: &mut Vec<FsNode>,
         directories: &mut Vec<Directory>,
     ) {
-        let current_dirs = self.directories.read().unwrap();
+        let runtime_data = self.runtime_data.read();
+        let current_dirs = &runtime_data.directories;
         let old_directory = current_dirs
             .get(&old_dir_node.content_hash)
             .unwrap()
@@ -238,13 +250,11 @@ impl Pfs {
         for entry in new_directory.entries.iter() {
             if !old_directory.entries.iter().any(|e| e.name == entry.name) {
                 // New entry!
-                let new_fs_node = self.inodes.read().unwrap()[entry.inode_number.0 as usize];
+                let new_fs_node = runtime_data.inodes[entry.inode_number.0 as usize];
                 if let FileType::Directory = new_fs_node.kind {
                     // Simplification, we assume that directories will always be created empty and that we don't need to recurse
-                    let new_directory = self
+                    let new_directory = runtime_data
                         .directories
-                        .read()
-                        .unwrap()
                         .get(&new_fs_node.content_hash)
                         .unwrap()
                         .clone();
@@ -258,7 +268,7 @@ impl Pfs {
                 .any(|e| e.name == entry.name && e.fs_node_hash != entry.fs_node_hash)
             {
                 // Changed entry!
-                let changed_fs_node = self.inodes.read().unwrap()[entry.inode_number.0 as usize];
+                let changed_fs_node = runtime_data.inodes[entry.inode_number.0 as usize];
                 if let FileType::Directory = changed_fs_node.kind {
                     let old_entry = old_directory
                         .entries
@@ -316,7 +326,7 @@ impl Pfs {
 
         info!(
             "Successfully restored filesystem tree from persistent storage with {} inodes",
-            self.inodes.read().unwrap().len()
+            self.runtime_data.read().inodes.len()
         );
         Ok(())
     }
@@ -352,9 +362,9 @@ impl Pfs {
                 }
 
                 // Store the updated directory
-                self.directories
+                self.runtime_data
                     .write()
-                    .unwrap()
+                    .directories
                     .insert(fs_node.content_hash, directory);
             } else {
                 warn!(
@@ -417,17 +427,17 @@ impl Pfs {
             error!("Failed to persist FsNode: {}", e);
         }
 
-        self.directories
+        self.runtime_data
             .write()
-            .unwrap()
+            .directories
             .insert(directory_node.content_hash, directory);
         directory_node
     }
 
     fn assign_inode_number(&mut self, fs_node: FsNode) -> InodeNumber {
-        let mut inodes = self.inodes.write().unwrap();
-        inodes.push(fs_node);
-        InodeNumber((inodes.len() - 1) as u64)
+        let mut runtime_data = self.runtime_data.write();
+        runtime_data.inodes.push(fs_node);
+        InodeNumber((runtime_data.inodes.len() - 1) as u64)
     }
 
     fn new_file_node_with_persistence(
@@ -502,7 +512,7 @@ impl Pfs {
     ) -> Result<(), i32> {
         let new_directory_node =
             self.new_directory_node(new_directory, old_directory_node.parent_inode_number);
-        self.inodes.write().unwrap()[inode_number.0 as usize] = new_directory_node;
+        self.runtime_data.write().inodes[inode_number.0 as usize] = new_directory_node;
         if let Some(parent_inode) = old_directory_node.parent_inode_number {
             self.update_directory_entry(
                 parent_inode,
@@ -524,16 +534,15 @@ impl Pfs {
     }
 
     fn get_directory(&self, inode_number: u64) -> Result<(FsNode, Directory), i32> {
-        let inodes = self.inodes.read().unwrap();
-        let Some(fs_node) = inodes.get(inode_number as usize) else {
+        let runtime_data = self.runtime_data.read();
+        let Some(fs_node) = runtime_data.inodes.get(inode_number as usize) else {
             return Err(libc::ENOENT);
         };
         if let FileType::Directory = fs_node.kind {
         } else {
             return Err(libc::ENOTDIR);
         };
-        let directories = self.directories.read().unwrap();
-        let Some(directory) = directories.get(&fs_node.content_hash) else {
+        let Some(directory) = runtime_data.directories.get(&fs_node.content_hash) else {
             return Err(libc::ENOTDIR);
         };
         Ok((*fs_node, directory.clone()))
@@ -558,8 +567,8 @@ impl Filesystem for Pfs {
     ) {
         let ttl = Duration::from_millis(1);
 
-        let inodes = self.inodes.read().unwrap();
-        let Some(fs_node) = inodes.get(ino as usize) else {
+        let runtime_data = self.runtime_data.read();
+        let Some(fs_node) = runtime_data.inodes.get(ino as usize) else {
             error!("No inode found for ino: {}", ino);
             reply.error(libc::ENOENT);
             return;
@@ -590,7 +599,8 @@ impl Filesystem for Pfs {
                 "..",
             );
             let mut offset = 2;
-            let inodes = self.inodes.read().unwrap();
+            let runtime_data = self.runtime_data.read();
+            let inodes = &runtime_data.inodes;
             for entry in directory.entries.iter() {
                 let fs_node = inodes[entry.inode_number.0 as usize];
                 let _ = reply.add(
@@ -669,7 +679,7 @@ impl Filesystem for Pfs {
             path: PathBuf::from(temp_file_path),
             writable: (flags & O_WRONLY > 0) || (flags & O_RDWR > 0),
         };
-        self.open_files.write().unwrap().push(Some(open_file));
+        self.runtime_data.write().open_files.push(Some(open_file));
         if let Err(error) = self.add_directory_entry(
             InodeNumber(parent),
             DirectoryEntry {
@@ -684,7 +694,7 @@ impl Filesystem for Pfs {
             &Duration::from_secs(60),
             &fs_node.as_file_attr(inode_number),
             0,
-            (self.open_files.read().unwrap().len() - 1)
+            (self.runtime_data.read().open_files.len() - 1)
                 .try_into()
                 .unwrap(),
             0,
@@ -697,7 +707,7 @@ impl Filesystem for Pfs {
             warn!("Tried to open a file in write mode");
             return reply.error(libc::ENOSYS);
         };
-        let fs_node = self.inodes.read().unwrap()[_ino as usize];
+        let fs_node = self.runtime_data.read().inodes[_ino as usize];
         let content_hash = fs_node.content_hash;
         let path = PathBuf::from(
             self.data_dir.clone()
@@ -710,9 +720,9 @@ impl Filesystem for Pfs {
             path,
             writable,
         };
-        let mut open_files = self.open_files.write().unwrap();
-        open_files.push(Some(open_file));
-        let fh = (open_files.len() - 1).try_into().unwrap();
+        let mut runtime_data = self.runtime_data.write();
+        runtime_data.open_files.push(Some(open_file));
+        let fh = (runtime_data.open_files.len() - 1).try_into().unwrap();
         reply.opened(fh, 0);
     }
 
@@ -732,8 +742,8 @@ impl Filesystem for Pfs {
             "Called write with ino: {} fh: {} offset: {} write_flags: {} flags: {} lock_owner: {:?}",
             ino, fh, offset, write_flags, flags, lock_owner
         );
-        let mut open_files = self.open_files.write().unwrap();
-        let open_file = open_files[fh as usize].as_mut().unwrap();
+        let mut runtime_data = self.runtime_data.write();
+        let open_file = runtime_data.open_files[fh as usize].as_mut().unwrap();
         let _ = open_file.backing_file.write_at(data, offset as u64);
         reply.written(data.len() as u32);
     }
@@ -749,8 +759,8 @@ impl Filesystem for Pfs {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
-        let mut open_files = self.open_files.write().unwrap();
-        let Some(Some(open_file)) = open_files.get_mut(fh as usize) else {
+        let mut runtime_data = self.runtime_data.write();
+        let Some(Some(open_file)) = runtime_data.open_files.get_mut(fh as usize) else {
             return reply.error(libc::ENOENT);
         };
         let _ = open_file.backing_file.seek(SeekFrom::Start(offset as u64));
@@ -770,8 +780,8 @@ impl Filesystem for Pfs {
         reply: fuser::ReplyEmpty,
     ) {
         let mut open_file = {
-            let mut open_files = self.open_files.write().unwrap();
-            std::mem::replace(&mut open_files[fh as usize], None).unwrap()
+            let mut runtime_data = self.runtime_data.write();
+            std::mem::replace(&mut runtime_data.open_files[fh as usize], None).unwrap()
         };
         if !open_file.writable {
             return reply.ok();
@@ -802,7 +812,7 @@ impl Filesystem for Pfs {
                 open_file.path, new_file_path, e
             );
         };
-        let old_fs_node = self.inodes.read().unwrap()[_ino as usize];
+        let old_fs_node = self.runtime_data.read().inodes[_ino as usize];
         let new_fs_node =
             self.new_file_node_with_persistence(content_hash, size, Some(InodeNumber(_ino)));
 
@@ -813,7 +823,7 @@ impl Filesystem for Pfs {
         ) {
             return reply.error(error);
         };
-        self.inodes.write().unwrap()[_ino as usize] = new_fs_node;
+        self.runtime_data.write().inodes[_ino as usize] = new_fs_node;
         reply.ok()
     }
 
@@ -828,10 +838,10 @@ impl Filesystem for Pfs {
             Ok(v) => v,
             Err(e) => return reply.error(e),
         };
-        let inodes = self.inodes.read().unwrap();
+        let runtime_data = self.runtime_data.read();
         for entry in directory.entries.iter() {
             if &entry.name == name.to_str().unwrap() {
-                let fs_node = &inodes[entry.inode_number.0 as usize];
+                let fs_node = &runtime_data.inodes[entry.inode_number.0 as usize];
                 return reply.entry(
                     &Duration::from_millis(1),
                     &fs_node.as_file_attr(entry.inode_number),
@@ -871,8 +881,8 @@ impl Filesystem for Pfs {
 
         // Get the file node to check if it's actually a file
         let file_node_kind = {
-            let inodes = self.inodes.read().unwrap();
-            match inodes.get(file_entry.inode_number.0 as usize) {
+            let runtime_data = self.runtime_data.read();
+            match runtime_data.inodes.get(file_entry.inode_number.0 as usize) {
                 Some(node) => node.kind,
                 None => return reply.error(libc::ENOENT),
             }
@@ -953,8 +963,9 @@ impl Filesystem for Pfs {
 
         // Update the parent inode number in the fs_node if moving to a different directory
         if parent != newparent {
-            let mut inodes = self.inodes.write().unwrap();
-            let fs_node = inodes
+            let mut runtime_data = self.runtime_data.write();
+            let fs_node = runtime_data
+                .inodes
                 .get_mut(source_entry.inode_number.0 as usize)
                 .unwrap();
             fs_node.parent_inode_number = Some(InodeNumber(newparent));

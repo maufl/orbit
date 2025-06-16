@@ -2527,6 +2527,7 @@ dependencies = [
  "libc",
  "log",
  "nix",
+ "parking_lot",
  "rand 0.8.5",
  "serde",
  "tokio",
