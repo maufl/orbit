@@ -279,7 +279,7 @@ impl Pfs {
         directories.push(new_directory);
     }
 
-    fn load_fs_node(
+    pub fn load_fs_node(
         &self,
         node_hash: &FsNodeHash,
     ) -> Result<Option<FsNode>, Box<dyn std::error::Error>> {

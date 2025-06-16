@@ -1,7 +1,7 @@
 use std::{env, thread};
 use std::num::ParseIntError;
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use iroh::endpoint::Connection;
 use iroh::PublicKey;
 use iroh::{discovery::mdns::MdnsDiscovery, NodeAddr, SecretKey, Endpoint};
@@ -55,13 +55,21 @@ async fn main() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn forward_root_hash(conn: Connection, mut recv: Receiver<(FsNodeHash, FsNodeHash)>, _pfs: Pfs) -> Result<(), anyhow::Error> {
+fn serialize_message(m: &Messages) -> Bytes {
+    let mut writer = BytesMut::new().writer();
+    ciborium::into_writer(m, &mut writer).expect("To be able to serialize the message");
+    writer.into_inner().freeze()
+}
+
+async fn forward_root_hash(conn: Connection, mut recv: Receiver<(FsNodeHash, FsNodeHash)>, pfs: Pfs) -> Result<(), anyhow::Error> {
     let (mut net_sender, _net_receiver) = conn.open_bi().await?;
-    while let Some((_old_hash, new_hash)) = recv.recv().await {
-        let msg = Messages::RootHashChanged(new_hash.0);
-        let mut datagram = BytesMut::new().writer();
-        ciborium::into_writer(&msg, &mut datagram).expect("To be able to serialize the message");
-        let _ = net_sender.write_chunk(datagram.into_inner().freeze()).await;
+    while let Some((old_hash, new_hash)) = recv.recv().await {
+        let old_node = pfs.load_fs_node(&old_hash).expect("to find node").unwrap();
+        let new_node = pfs.load_fs_node(&new_hash).expect("to find ?&node").unwrap();
+        let (updated_fs_nodes, updated_directories) = pfs.diff(&old_node, &new_node);
+        let _ = net_sender.write_chunk(serialize_message(&Messages::NewFsNodes(updated_fs_nodes))).await;
+        let _ = net_sender.write_chunk(serialize_message(&Messages::NewDirectories(updated_directories))).await;
+        let _ = net_sender.write_chunk(serialize_message(&Messages::RootHashChanged(new_hash.0))).await;
     };
     Ok(())
 }
