@@ -59,12 +59,12 @@ pub struct FsNode {
 }
 
 impl FsNode {
+    fn is_directory(&self) -> bool {
+        matches!(self.kind, FileType::Directory)
+    }
+
     fn as_file_attr(&self, inode_number: InodeNumber) -> FileAttr {
-        let is_directory = if let FileType::Directory = self.kind {
-            true
-        } else {
-            false
-        };
+        let is_directory = self.is_directory();
         FileAttr {
             ino: inode_number.0 as u64,
             size: self.size,
@@ -251,7 +251,7 @@ impl Pfs {
             if !old_directory.entries.iter().any(|e| e.name == entry.name) {
                 // New entry!
                 let new_fs_node = runtime_data.inodes[entry.inode_number.0 as usize];
-                if let FileType::Directory = new_fs_node.kind {
+                if new_fs_node.is_directory() {
                     // Simplification, we assume that directories will always be created empty and that we don't need to recurse
                     let new_directory = runtime_data
                         .directories
@@ -269,7 +269,7 @@ impl Pfs {
             {
                 // Changed entry!
                 let changed_fs_node = runtime_data.inodes[entry.inode_number.0 as usize];
-                if let FileType::Directory = changed_fs_node.kind {
+                if changed_fs_node.is_directory() {
                     let old_entry = old_directory
                         .entries
                         .iter()
@@ -345,7 +345,7 @@ impl Pfs {
             "Restored fs_node with hash {:?} to inode {:?}, type: {:?}",
             fs_node_hash, inode_number, fs_node.kind
         );
-        if let FileType::Directory = fs_node.kind {
+        if fs_node.is_directory() {
             // Load the directory structure
             if let Some(mut directory) = self.load_directory(&fs_node.content_hash)? {
                 debug!("Loading directory with {} entries", directory.entries.len());
@@ -538,10 +538,9 @@ impl Pfs {
         let Some(fs_node) = runtime_data.inodes.get(inode_number as usize) else {
             return Err(libc::ENOENT);
         };
-        if let FileType::Directory = fs_node.kind {
-        } else {
+        if !fs_node.is_directory() {
             return Err(libc::ENOTDIR);
-        };
+        }
         let Some(directory) = runtime_data.directories.get(&fs_node.content_hash) else {
             return Err(libc::ENOTDIR);
         };
@@ -606,7 +605,7 @@ impl Filesystem for Pfs {
                 let _ = reply.add(
                     entry.inode_number.0 as u64,
                     offset,
-                    if let FileType::Directory = fs_node.kind {
+                    if fs_node.is_directory() {
                         fuser::FileType::Directory
                     } else {
                         fuser::FileType::RegularFile
