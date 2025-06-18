@@ -28,7 +28,7 @@ pub struct ContentHash([u8; 32]);
 pub struct FsNodeHash(pub [u8; 32]);
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
-pub struct InodeNumber(u64);
+pub struct InodeNumber(pub u64);
 
 fn calculate_hash<T: Serialize>(v: &T) -> [u8; 32] {
     let mut buffer = Vec::new();
@@ -116,7 +116,7 @@ impl FsNode {
         }
     }
 
-    fn calculate_hash(&self) -> FsNodeHash {
+    pub fn calculate_hash(&self) -> FsNodeHash {
         FsNodeHash(calculate_hash(&self))
     }
 }
@@ -137,8 +137,12 @@ pub struct Directory {
 }
 
 impl Directory {
-    fn calculate_hash(&self) -> ContentHash {
+    pub fn calculate_hash(&self) -> ContentHash {
         ContentHash(calculate_hash(&self))
+    }
+
+    fn entry_by_name(&self, name: &str) -> Option<&DirectoryEntry> {
+        self.entries.iter().find(|e| e.name == name)
     }
 }
 
@@ -161,8 +165,8 @@ pub struct Pfs {
     data_dir: String,
     /// This field may not be removed! It looks unused, but if you drop the Keyspace fjall will stop working
     keyspace: Keyspace,
-    fs_nodes_partition: PartitionHandle,
-    directories_partition: PartitionHandle,
+    pub fs_nodes_partition: PartitionHandle,
+    pub directories_partition: PartitionHandle,
     root_node_hash_sender: Option<Sender<(FsNodeHash, FsNodeHash)>>,
 }
 
@@ -277,8 +281,7 @@ impl Pfs {
                         .unwrap();
                     let old_fs_node = self
                         .load_fs_node(&old_entry.fs_node_hash)
-                        .expect("To find old FsNode")
-                        .unwrap();
+                        .expect("To find old FsNode");
                     self.diff_recursive(&old_fs_node, &changed_fs_node, fs_nodes, directories);
                 } else {
                     fs_nodes.push(changed_fs_node);
@@ -289,26 +292,86 @@ impl Pfs {
         directories.push(new_directory);
     }
 
-    pub fn load_fs_node(
-        &self,
-        node_hash: &FsNodeHash,
-    ) -> Result<Option<FsNode>, Box<dyn std::error::Error>> {
+    pub fn load_fs_node(&self, node_hash: &FsNodeHash) -> Result<FsNode, anyhow::Error> {
         if let Some(value) = self.fs_nodes_partition.get(&node_hash.0)? {
             let fs_node: FsNode = ciborium::from_reader(&*value)?;
-            return Ok(Some(fs_node));
+            return Ok(fs_node);
         }
-        Ok(None)
+        Err(anyhow::anyhow!(
+            "FsNode with hash {:?} not found",
+            node_hash
+        ))
     }
 
-    fn load_directory(
-        &self,
-        content_hash: &ContentHash,
-    ) -> Result<Option<Directory>, Box<dyn std::error::Error>> {
+    fn load_directory(&self, content_hash: &ContentHash) -> Result<Directory, anyhow::Error> {
         if let Some(value) = self.directories_partition.get(&content_hash.0)? {
             let directory: Directory = ciborium::from_reader(&*value)?;
-            return Ok(Some(directory));
+            return Ok(directory);
         }
-        Ok(None)
+        Err(anyhow::anyhow!(
+            "Directory with hash {:?} not found",
+            content_hash
+        ))
+    }
+
+    pub fn update_directory_recursive(
+        &mut self,
+        old_dir_hash: &FsNodeHash,
+        new_dir_hash: &FsNodeHash,
+        inode_number: InodeNumber,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Load the old and new directory FsNodes
+        let old_dir_node = self.load_fs_node(old_dir_hash)?;
+        let new_dir_node = self.load_fs_node(new_dir_hash)?;
+
+        // Both should be directories
+        if !old_dir_node.is_directory() || !new_dir_node.is_directory() {
+            return Err("Both nodes must be directories".into());
+        }
+
+        // Load the directory contents
+        let old_directory = self.load_directory(&old_dir_node.content_hash)?;
+        let mut new_directory = self.load_directory(&new_dir_node.content_hash)?;
+        new_directory.parent_inode_number = old_directory.parent_inode_number;
+
+        // Compare entries and handle changes
+        for new_entry in &mut new_directory.entries {
+            // Check if this is a new entry
+            let old_entry = old_directory.entry_by_name(&new_entry.name);
+            if let Some(old_entry) = old_entry {
+                let new_fs_node = self.load_fs_node(&new_entry.fs_node_hash)?;
+                let old_fs_node = self.load_fs_node(&old_entry.fs_node_hash)?;
+
+                if old_fs_node.is_directory() && new_fs_node.is_directory() {
+                    let _ = self.update_directory_recursive(
+                        &old_fs_node.calculate_hash(),
+                        &new_fs_node.calculate_hash(),
+                        old_entry.inode_number,
+                    );
+                    new_entry.inode_number = old_entry.inode_number;
+                } else if !old_fs_node.is_directory() && new_fs_node.is_directory() {
+                    // Assign a new inode number for this entry
+                    new_entry.inode_number =
+                        self.restore_node_recursive(&new_entry.fs_node_hash, Some(inode_number))?;
+                } else {
+                    new_entry.inode_number = old_entry.inode_number;
+                    self.runtime_data.write().inodes[new_entry.inode_number.0 as usize] =
+                        new_fs_node;
+                }
+            } else {
+                // new entry
+                new_entry.inode_number =
+                    self.restore_node_recursive(&new_entry.fs_node_hash, Some(inode_number))?;
+            }
+        }
+
+        // Update the directory in our runtime data with corrected inode numbers
+        self.runtime_data
+            .write()
+            .directories
+            .insert(new_dir_node.content_hash, new_directory);
+
+        Ok(())
     }
 
     fn restore_filesystem_tree(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -336,9 +399,7 @@ impl Pfs {
         fs_node_hash: &FsNodeHash,
         parent_inode_number: Option<InodeNumber>,
     ) -> Result<InodeNumber, Box<dyn std::error::Error>> {
-        let Some(mut fs_node) = self.load_fs_node(fs_node_hash)? else {
-            return Err(format!("Unable to load fs node with hash {:?}", fs_node_hash).into());
-        };
+        let mut fs_node = self.load_fs_node(fs_node_hash)?;
         fs_node.parent_inode_number = parent_inode_number;
         let inode_number = self.assign_inode_number(fs_node);
         debug!(
@@ -347,40 +408,40 @@ impl Pfs {
         );
         if fs_node.is_directory() {
             // Load the directory structure
-            if let Some(mut directory) = self.load_directory(&fs_node.content_hash)? {
-                debug!("Loading directory with {} entries", directory.entries.len());
-                // Update the parent inode number
-                directory.parent_inode_number = parent_inode_number;
+            match self.load_directory(&fs_node.content_hash) {
+                Ok(mut directory) => {
+                    debug!("Loading directory with {} entries", directory.entries.len());
+                    // Update the parent inode number
+                    directory.parent_inode_number = parent_inode_number;
 
-                // Restore each entry in the directory, updating with correct inode numbers
-                for entry in &mut directory.entries {
-                    debug!("Restoring directory entry: {}", entry.name);
-                    let child_inode_number =
-                        self.restore_node_recursive(&entry.fs_node_hash, Some(inode_number))?;
-                    // Update the entry with the correct inode number
-                    entry.inode_number = child_inode_number;
+                    // Restore each entry in the directory, updating with correct inode numbers
+                    for entry in &mut directory.entries {
+                        debug!("Restoring directory entry: {}", entry.name);
+                        let child_inode_number =
+                            self.restore_node_recursive(&entry.fs_node_hash, Some(inode_number))?;
+                        // Update the entry with the correct inode number
+                        entry.inode_number = child_inode_number;
+                    }
+
+                    // Store the updated directory
+                    self.runtime_data
+                        .write()
+                        .directories
+                        .insert(fs_node.content_hash, directory);
                 }
-
-                // Store the updated directory
-                self.runtime_data
-                    .write()
-                    .directories
-                    .insert(fs_node.content_hash, directory);
-            } else {
-                warn!(
-                    "Directory content not found for FsNode with hash {:?}",
-                    fs_node.content_hash
-                );
+                Err(e) => {
+                    warn!(
+                        "Directory content not found for FsNode with hash {:?}: {}",
+                        fs_node.content_hash, e
+                    );
+                }
             }
         }
         Ok(inode_number)
     }
 
-    fn persist_fs_node(
-        &self,
-        node_hash: &FsNodeHash,
-        fs_node: &FsNode,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn persist_fs_node(&self, fs_node: &FsNode) -> Result<(), Box<dyn std::error::Error>> {
+        let node_hash = fs_node.calculate_hash();
         let key = node_hash.0;
         let mut value = Vec::new();
         ciborium::into_writer(fs_node, &mut value)?;
@@ -398,11 +459,11 @@ impl Pfs {
         Ok(())
     }
 
-    fn persist_directory(
+    pub fn persist_directory(
         &self,
-        content_hash: &ContentHash,
         directory: &Directory,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let content_hash = directory.calculate_hash();
         let key = content_hash.0;
         let mut value = Vec::new();
         ciborium::into_writer(directory, &mut value)?;
@@ -420,10 +481,10 @@ impl Pfs {
             FsNode::new_directory_node(directory.calculate_hash(), 0, parent_inode_number);
 
         // Persist the directory and FsNode
-        if let Err(e) = self.persist_directory(&directory_node.content_hash, &directory) {
+        if let Err(e) = self.persist_directory(&directory) {
             error!("Failed to persist directory: {}", e);
         }
-        if let Err(e) = self.persist_fs_node(&directory_node.calculate_hash(), &directory_node) {
+        if let Err(e) = self.persist_fs_node(&directory_node) {
             error!("Failed to persist FsNode: {}", e);
         }
 
@@ -448,7 +509,7 @@ impl Pfs {
     ) -> FsNode {
         let fs_node = FsNode::new_file_node(content_hash, size, parent_inode_number);
 
-        if let Err(e) = self.persist_fs_node(&fs_node.calculate_hash(), &fs_node) {
+        if let Err(e) = self.persist_fs_node(&fs_node) {
             error!("Failed to persist FsNode: {}", e);
         }
 

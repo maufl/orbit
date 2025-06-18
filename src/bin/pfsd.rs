@@ -1,12 +1,12 @@
 use std::{env, thread};
 use std::num::ParseIntError;
 
-use bytes::{BufMut, Bytes, BytesMut};
-use iroh::endpoint::Connection;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::PublicKey;
 use iroh::{discovery::mdns::MdnsDiscovery, NodeAddr, SecretKey, Endpoint};
 use pfs::network::{Messages, APLN};
-use pfs::{Pfs, FsNodeHash};
+use pfs::{FsNodeHash, InodeNumber, Pfs};
 
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -43,7 +43,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let node_addr = NodeAddr::new(PublicKey::from_bytes(&remote_pub_key)?);
     let (sender, receiver) = tokio::sync::mpsc::channel(10);
     let conn = endpoint.connect(node_addr, APLN.as_bytes()).await?;
-
+    let (net_sender, _net_receiver) = conn.open_bi().await?;
     let pfs = initialize_pfs(sender);
     {
         let pfs = pfs.clone();
@@ -51,7 +51,11 @@ async fn main() -> Result<(), anyhow::Error> {
             run_fs(pfs);
         });
     }
-    let _ = forward_root_hash(conn, receiver, pfs).await;
+    {
+        let pfs = pfs.clone();
+        tokio::spawn(async move { listen_for_updates(_net_receiver, pfs) });
+    }
+    let _ = forward_root_hash(net_sender, receiver, pfs).await;
     Ok(())
 }
 
@@ -61,11 +65,34 @@ fn serialize_message(m: &Messages) -> Bytes {
     writer.into_inner().freeze()
 }
 
-async fn forward_root_hash(conn: Connection, mut recv: Receiver<(FsNodeHash, FsNodeHash)>, pfs: Pfs) -> Result<(), anyhow::Error> {
-    let (mut net_sender, _net_receiver) = conn.open_bi().await?;
+async fn listen_for_updates(mut net_receiver: RecvStream, mut pfs: Pfs) -> Result<(), anyhow::Error> {
+    while let Some(chunk) = net_receiver.read_chunk(15_000, true).await? {
+        let msg: Messages = ciborium::from_reader(chunk.bytes.reader())?;
+        match msg {
+            Messages::NewDirectories(dirs) => {
+                for dir in dirs {
+                    let _ = pfs.persist_directory(&dir);
+                }
+            },
+            Messages::NewFsNodes(nodes) => {
+                for node in nodes {
+                    let _ = pfs.persist_fs_node(&node);
+                }
+            },
+            Messages::RootHashChanged(new_root_hash) => {
+                let new_root_hash = FsNodeHash(new_root_hash);
+                let old_root_hash = pfs.get_root_node().calculate_hash();
+                let _ = pfs.update_directory_recursive(&old_root_hash, &new_root_hash, InodeNumber(1));
+            }
+        }
+    };
+    Ok(())
+}
+
+async fn forward_root_hash(mut net_sender: SendStream, mut recv: Receiver<(FsNodeHash, FsNodeHash)>, pfs: Pfs) -> Result<(), anyhow::Error> {
     while let Some((old_hash, new_hash)) = recv.recv().await {
-        let old_node = pfs.load_fs_node(&old_hash).expect("to find node").unwrap();
-        let new_node = pfs.load_fs_node(&new_hash).expect("to find ?&node").unwrap();
+        let old_node = pfs.load_fs_node(&old_hash).expect("to find node");
+        let new_node = pfs.load_fs_node(&new_hash).expect("to find node");
         let (updated_fs_nodes, updated_directories) = pfs.diff(&old_node, &new_node);
         let _ = net_sender.write_chunk(serialize_message(&Messages::NewFsNodes(updated_fs_nodes))).await;
         let _ = net_sender.write_chunk(serialize_message(&Messages::NewDirectories(updated_directories))).await;
