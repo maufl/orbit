@@ -1,14 +1,14 @@
 use std::num::ParseIntError;
-use std::{env, fs, path::PathBuf, thread};
+use std::{path::PathBuf, thread};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use clap::Parser;
 use iroh::PublicKey;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
-use iroh::{Endpoint, NodeAddr, SecretKey, discovery::mdns::MdnsDiscovery};
+use iroh::{Endpoint, NodeAddr, discovery::mdns::MdnsDiscovery};
+use pfs::config::Config;
 use pfs::network::{APLN, Messages};
 use pfs::{FsNodeHash, InodeNumber, Pfs};
-use serde::{Deserialize, Serialize};
 
 use tokio::sync::broadcast::{Receiver, Sender};
 
@@ -33,95 +33,6 @@ struct Args {
     remote_node: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Config {
-    /// Private key for this node (hex encoded)
-    private_key: Option<String>,
-    /// Directory to store filesystem data
-    data_dir: String,
-    /// Mount point for the filesystem
-    mount_point: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        let home = env::var("HOME").expect("HOME environment variable must be set");
-        let data_home =
-            env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home));
-
-        Self {
-            private_key: None,
-            data_dir: format!("{}/pfs_data", data_home),
-            mount_point: format!("{}/Orbit", home),
-        }
-    }
-}
-
-impl Config {
-    fn load_from_file(path: &PathBuf) -> Result<Self, anyhow::Error> {
-        let content = fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&content)?;
-        Ok(config)
-    }
-
-    fn save_to_file(&self, path: &PathBuf) -> Result<(), anyhow::Error> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let content = toml::to_string_pretty(self)?;
-        fs::write(path, content)?;
-        Ok(())
-    }
-
-    fn get_default_config_path() -> PathBuf {
-        let config_home = env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
-            let home = env::var("HOME").expect("HOME environment variable must be set");
-            format!("{}/.config", home)
-        });
-        PathBuf::from(config_home).join("pfsd.toml")
-    }
-
-    fn load_or_create(config_path: Option<PathBuf>) -> Result<Self, anyhow::Error> {
-        let path = config_path.unwrap_or_else(Self::get_default_config_path);
-
-        let mut config = if path.exists() {
-            debug!("Loading config from: {:?}", path);
-            Self::load_from_file(&path)?
-        } else {
-            debug!("Creating new config at: {:?}", path);
-            Self::default()
-        };
-
-        // Generate private key if not present
-        if config.private_key.is_none() {
-            let mut rng = rand::rngs::OsRng;
-            let secret_key = SecretKey::generate(&mut rng);
-            config.private_key = Some(hex::encode(secret_key.to_bytes()));
-            debug!("Generated new private key");
-        }
-
-        // Save the config (with any generated defaults)
-        config.save_to_file(&path)?;
-        debug!("Saved config to: {:?}", path);
-
-        Ok(config)
-    }
-
-    fn get_secret_key(&self) -> Result<SecretKey, anyhow::Error> {
-        let key_hex = self
-            .private_key
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Private key not set in config"))?;
-        let key_bytes = hex::decode(key_hex)?;
-        if key_bytes.len() != 32 {
-            return Err(anyhow::anyhow!("Private key must be 32 bytes"));
-        }
-        let mut key_array = [0u8; 32];
-        key_array.copy_from_slice(&key_bytes);
-        let secret_key = SecretKey::from_bytes(&key_array);
-        Ok(secret_key)
-    }
-}
 
 fn initialize_pfs(config: &Config, net_sender: Option<Sender<(FsNodeHash, FsNodeHash)>>) -> Pfs {
     let data_dir = &config.data_dir;

@@ -19,6 +19,7 @@ use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Sender;
 
+pub mod config;
 pub mod network;
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
