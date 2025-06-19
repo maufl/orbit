@@ -17,7 +17,7 @@ use fuser::{FileAttr, Filesystem};
 use libc::{O_RDWR, O_WRONLY};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::broadcast::Sender;
 
 pub mod network;
 
@@ -588,7 +588,7 @@ impl Pfs {
                 error!("Failed to persist root hash: {}", e);
             }
             if let Some(ref mut sender) = self.root_node_hash_sender {
-                let _ = sender.blocking_send((old_root_hash, root_hash));
+                let _ = sender.send((old_root_hash, root_hash));
             }
         };
         Ok(())
