@@ -155,15 +155,13 @@ async fn main() -> Result<(), anyhow::Error> {
         .alpns(vec![APLN.as_bytes().to_vec()])
         .bind()
         .await?;
-
+    let (shutdown_sender, shutdown_receiver) = tokio::sync::broadcast::channel(1);
     let (sender, receiver) = tokio::sync::broadcast::channel(10);
     let pfs = initialize_pfs(&config, Some(sender.clone()));
     {
         let pfs = pfs.clone();
         let mount_point = config.mount_point.clone();
-        thread::spawn(move || {
-            run_fs(pfs, mount_point);
-        });
+        thread::spawn(move || run_fs(pfs, mount_point, shutdown_receiver));
     }
     {
         let pfs = pfs.clone();
@@ -190,6 +188,7 @@ async fn main() -> Result<(), anyhow::Error> {
     }
     // Keep the main task running indefinitely in standalone mode
     tokio::signal::ctrl_c().await?;
+    let _ = shutdown_sender.send(());
     info!("Received Ctrl+C, shutting down...");
 
     Ok(())
@@ -285,19 +284,13 @@ async fn forward_root_hash(
     Ok(())
 }
 
-fn run_fs(fs: Pfs, mount_point: String) {
+fn run_fs(fs: Pfs, mount_point: String, mut close_receiver: Receiver<()>) {
     if let Err(e) = std::fs::create_dir_all(&mount_point) {
         error!("Failed to ensure mount point exists: {}", e);
         return;
     };
     info!("Mounting to {}", mount_point);
-    let (send, recv) = std::sync::mpsc::channel();
-    let send_ctrlc = send.clone();
-    ctrlc::set_handler(move || {
-        send_ctrlc.send(()).unwrap();
-    })
-    .unwrap();
     let guard = fuser::spawn_mount2(fs, &mount_point, &vec![]).unwrap();
-    let () = recv.recv().unwrap();
+    let _ = close_receiver.blocking_recv();
     drop(guard)
 }
