@@ -1,5 +1,3 @@
-use std::{path::PathBuf, thread};
-
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use clap::Parser;
 use iroh::PublicKey;
@@ -8,6 +6,8 @@ use iroh::{Endpoint, NodeAddr, discovery::mdns::MdnsDiscovery};
 use pfs::config::Config;
 use pfs::network::{APLN, Messages};
 use pfs::{FsNodeHash, InodeNumber, Pfs};
+use std::time::Duration;
+use std::{path::PathBuf, thread};
 
 use tokio::sync::broadcast::{Receiver, Sender};
 
@@ -24,7 +24,6 @@ struct Args {
     /// Remote node public key to connect to (hex format). If not provided, runs without network connection.
     remote_node: Option<String>,
 }
-
 
 fn initialize_pfs(config: &Config, net_sender: Option<Sender<(FsNodeHash, FsNodeHash)>>) -> Pfs {
     let data_dir = &config.data_dir;
@@ -58,6 +57,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .alpns(vec![APLN.as_bytes().to_vec()])
         .bind()
         .await?;
+    info!("Node ID is {}", endpoint.node_id());
     let (shutdown_sender, shutdown_receiver) = tokio::sync::broadcast::channel(1);
     let (sender, receiver) = tokio::sync::broadcast::channel(10);
     let pfs = initialize_pfs(&config, Some(sender.clone()));
@@ -69,7 +69,12 @@ async fn main() -> Result<(), anyhow::Error> {
     {
         let pfs = pfs.clone();
         let endpoint = endpoint.clone();
-        tokio::spawn(async move { accept_connections(endpoint, pfs, sender) });
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            if let Err(e) = accept_connections(endpoint, pfs, sender).await {
+                warn!("Error accepting connections: {}", e);
+            }
+        });
     }
 
     // Check if we should connect to a remote node
@@ -81,10 +86,13 @@ async fn main() -> Result<(), anyhow::Error> {
         remote_pub_key.copy_from_slice(&remote_node_id);
 
         let node_addr = NodeAddr::new(PublicKey::from_bytes(&remote_pub_key)?);
-        if let Ok(conn) = endpoint.connect(node_addr, APLN.as_bytes()).await {
-            if let Err(e) = handle_connection(conn, pfs, receiver).await {
-                warn!("Error while handling new connection: {}", e);
-            };
+        match endpoint.connect(node_addr, APLN.as_bytes()).await {
+            Ok(conn) => {
+                if let Err(e) = handle_connection(conn, pfs, receiver).await {
+                    warn!("Error while handling new connection: {}", e);
+                }
+            }
+            Err(e) => warn!("Unable to connect to {:?}, {}", remote_pub_key, e),
         }
     } else {
         info!("Running in standalone mode (no remote node)");
@@ -103,7 +111,9 @@ async fn accept_connections(
     sender: Sender<(FsNodeHash, FsNodeHash)>,
 ) -> Result<(), anyhow::Error> {
     while let Some(incommig) = endpoint.accept().await {
+        debug!("Incomming connection from {}", incommig.remote_address());
         if let Ok(conn) = incommig.await {
+            debug!("Acceping connection from {:?}", conn.remote_node_id());
             let pfs = pfs.clone();
             let receiver = sender.subscribe();
             tokio::spawn(async move { handle_connection(conn, pfs, receiver).await });
@@ -123,7 +133,7 @@ async fn handle_connection(
 
     {
         let pfs = pfs.clone();
-        tokio::spawn(async move { listen_for_updates(net_receiver, pfs) });
+        tokio::spawn(async move { listen_for_updates(net_receiver, pfs).await });
     }
     tokio::spawn(async move { forward_root_hash(net_sender, receiver, pfs).await });
     Ok(())
@@ -140,11 +150,15 @@ async fn listen_for_updates(
     mut pfs: Pfs,
 ) -> Result<(), anyhow::Error> {
     while let Some(chunk) = net_receiver.read_chunk(15_000, true).await? {
+        info!("Received update from peer");
         let msg: Messages = ciborium::from_reader(chunk.bytes.reader())?;
+        debug!("Message is {:?}", msg);
         match msg {
             Messages::NewDirectories(dirs) => {
                 for dir in dirs {
-                    let _ = pfs.persist_directory(&dir);
+                    if let Err(e) = pfs.persist_directory(&dir) {
+                        warn!("Unable to persist directories: {}", e);
+                    }
                 }
             }
             Messages::NewFsNodes(nodes) => {
@@ -169,20 +183,30 @@ async fn forward_root_hash(
     pfs: Pfs,
 ) -> Result<(), anyhow::Error> {
     while let Ok((old_hash, new_hash)) = recv.recv().await {
+        info!("Root hash changes, sending updates to peer");
         let old_node = pfs.load_fs_node(&old_hash).expect("to find node");
         let new_node = pfs.load_fs_node(&new_hash).expect("to find node");
         let (updated_fs_nodes, updated_directories) = pfs.diff(&old_node, &new_node);
-        let _ = net_sender
+        if let Err(e) = net_sender
             .write_chunk(serialize_message(&Messages::NewFsNodes(updated_fs_nodes)))
-            .await;
-        let _ = net_sender
+            .await
+        {
+            warn!("Error sending new fs nodes: {}", e);
+        }
+        if let Err(e) = net_sender
             .write_chunk(serialize_message(&Messages::NewDirectories(
                 updated_directories,
             )))
-            .await;
-        let _ = net_sender
+            .await
+        {
+            warn!("Error sending new directories: {}", e);
+        }
+        if let Err(e) = net_sender
             .write_chunk(serialize_message(&Messages::RootHashChanged(new_hash.0)))
-            .await;
+            .await
+        {
+            warn!("Error sending changed root hash: {}", e)
+        }
     }
     Ok(())
 }
