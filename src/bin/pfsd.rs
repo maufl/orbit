@@ -1,4 +1,3 @@
-use std::num::ParseIntError;
 use std::{path::PathBuf, thread};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -13,13 +12,6 @@ use pfs::{FsNodeHash, InodeNumber, Pfs};
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use log::{LevelFilter, debug, error, info, warn};
-
-pub fn decode_hex(s: &str) -> Result<Vec<u8>, ParseIntError> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
-        .collect()
-}
 
 #[derive(Parser)]
 #[command(name = "pfsd")]
@@ -84,7 +76,7 @@ async fn main() -> Result<(), anyhow::Error> {
     if let Some(remote_node_str) = args.remote_node {
         info!("Connecting to remote node: {}", remote_node_str);
 
-        let remote_node_id = decode_hex(&remote_node_str)?;
+        let remote_node_id = hex::decode(&remote_node_str)?;
         let mut remote_pub_key = [0u8; 32];
         remote_pub_key.copy_from_slice(&remote_node_id);
 
