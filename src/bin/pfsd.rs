@@ -173,14 +173,14 @@ async fn listen_for_updates(
             match msg {
                 Messages::NewDirectories(dirs) => {
                     for dir in dirs {
-                        if let Err(e) = pfs.persist_directory(&dir) {
+                        if let Err(e) = pfs.persistence.persist_directory(&dir) {
                             warn!("Unable to persist directories: {}", e);
                         }
                     }
                 }
                 Messages::NewFsNodes(nodes) => {
                     for node in nodes {
-                        if let Err(e) = pfs.persist_fs_node(&node) {
+                        if let Err(e) = pfs.persistence.persist_fs_node(&node) {
                             warn!("Unable to persist FS node: {}", e);
                         }
                     }
@@ -204,7 +204,7 @@ async fn listen_for_updates(
                         "Received Hello message from peer, their root hash is {}",
                         root_hash
                     );
-                    if let Err(err) = pfs.load_fs_node(&root_hash) {
+                    if let Err(err) = pfs.persistence.load_fs_node(&root_hash) {
                         info!(
                             "The remotes root node {} is unknown to us: {}",
                             root_hash, err
@@ -231,8 +231,14 @@ async fn forward_root_hash(
         .await;
     while let Ok((old_hash, new_hash)) = recv.recv().await {
         info!("Root hash changes, sending updates to peer");
-        let old_node = pfs.load_fs_node(&old_hash).expect("to find node");
-        let new_node = pfs.load_fs_node(&new_hash).expect("to find node");
+        let old_node = pfs
+            .persistence
+            .load_fs_node(&old_hash)
+            .expect("to find node");
+        let new_node = pfs
+            .persistence
+            .load_fs_node(&new_hash)
+            .expect("to find node");
         let (updated_fs_nodes, updated_directories) = pfs.diff(&old_node, &new_node);
         if let Err(e) = net_sender
             .write_chunk(serialize_message(&Messages::NewFsNodes(updated_fs_nodes)))
