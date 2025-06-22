@@ -88,7 +88,7 @@ async fn main() -> Result<(), anyhow::Error> {
         let node_addr = NodeAddr::new(PublicKey::from_bytes(&remote_pub_key)?);
         match endpoint.connect(node_addr, APLN.as_bytes()).await {
             Ok(conn) => {
-                if let Err(e) = handle_connection(conn, pfs, receiver).await {
+                if let Err(e) = open_connection(conn, pfs, receiver).await {
                     warn!("Error while handling new connection: {}", e);
                 }
             }
@@ -116,7 +116,12 @@ async fn accept_connections(
             debug!("Acceping connection from {:?}", conn.remote_node_id());
             let pfs = pfs.clone();
             let receiver = sender.subscribe();
-            tokio::spawn(async move { handle_connection(conn, pfs, receiver).await });
+            let (net_sender, net_receiver) = conn.accept_bi().await?;
+            {
+                let pfs = pfs.clone();
+                tokio::spawn(async move { listen_for_updates(net_receiver, pfs).await });
+            }
+            tokio::spawn(async move { forward_root_hash(net_sender, receiver, pfs).await });
         } else {
             info!("Failed to accept incomming connection");
         }
@@ -124,18 +129,27 @@ async fn accept_connections(
     Ok(())
 }
 
-async fn handle_connection(
+async fn open_connection(
     conn: Connection,
     pfs: Pfs,
     receiver: Receiver<(FsNodeHash, FsNodeHash)>,
 ) -> Result<(), anyhow::Error> {
+    debug!("Handling new connection from {}", conn.remote_node_id()?);
     let (net_sender, net_receiver) = conn.open_bi().await?;
 
     {
         let pfs = pfs.clone();
-        tokio::spawn(async move { listen_for_updates(net_receiver, pfs).await });
+        tokio::spawn(async move {
+            listen_for_updates(net_receiver, pfs)
+                .await
+                .inspect_err(|e| warn!("Stopped listening for updates, encountered error {}", e))
+        });
     }
-    tokio::spawn(async move { forward_root_hash(net_sender, receiver, pfs).await });
+    tokio::spawn(async move {
+        forward_root_hash(net_sender, receiver, pfs)
+            .await
+            .inspect_err(|e| warn!("Stopped sending updated, encountered error{}", e))
+    });
     Ok(())
 }
 
@@ -151,26 +165,36 @@ async fn listen_for_updates(
 ) -> Result<(), anyhow::Error> {
     while let Some(chunk) = net_receiver.read_chunk(15_000, true).await? {
         info!("Received update from peer");
-        let msg: Messages = ciborium::from_reader(chunk.bytes.reader())?;
-        debug!("Message is {:?}", msg);
-        match msg {
-            Messages::NewDirectories(dirs) => {
-                for dir in dirs {
-                    if let Err(e) = pfs.persist_directory(&dir) {
-                        warn!("Unable to persist directories: {}", e);
+        let mut reader = chunk.bytes.reader();
+        while let Ok(msg) = ciborium::from_reader(&mut reader) {
+            debug!("Message is {:?}", msg);
+            match msg {
+                Messages::NewDirectories(dirs) => {
+                    for dir in dirs {
+                        if let Err(e) = pfs.persist_directory(&dir) {
+                            warn!("Unable to persist directories: {}", e);
+                        }
                     }
                 }
-            }
-            Messages::NewFsNodes(nodes) => {
-                for node in nodes {
-                    let _ = pfs.persist_fs_node(&node);
+                Messages::NewFsNodes(nodes) => {
+                    for node in nodes {
+                        if let Err(e) = pfs.persist_fs_node(&node) {
+                            warn!("Unable to persist FS node: {}", e);
+                        }
+                    }
                 }
-            }
-            Messages::RootHashChanged(new_root_hash) => {
-                let new_root_hash = FsNodeHash(new_root_hash);
-                let old_root_hash = pfs.get_root_node().calculate_hash();
-                let _ =
-                    pfs.update_directory_recursive(&old_root_hash, &new_root_hash, InodeNumber(1));
+                Messages::RootHashChanged(new_root_hash) => {
+                    let new_root_hash = FsNodeHash(new_root_hash);
+                    let old_root_hash = pfs.get_root_node().calculate_hash();
+                    if let Err(e) = pfs.update_directory_recursive(
+                        &old_root_hash,
+                        &new_root_hash,
+                        InodeNumber(1),
+                    ) {
+                        error!("Unable to update root hash: {}", e);
+                    }
+                }
+                Messages::Hello => debug!("Received Hello message from peer"),
             }
         }
     }
@@ -182,6 +206,10 @@ async fn forward_root_hash(
     mut recv: Receiver<(FsNodeHash, FsNodeHash)>,
     pfs: Pfs,
 ) -> Result<(), anyhow::Error> {
+    debug!("Sending hello");
+    let _ = net_sender
+        .write_chunk(serialize_message(&Messages::Hello))
+        .await;
     while let Ok((old_hash, new_hash)) = recv.recv().await {
         info!("Root hash changes, sending updates to peer");
         let old_node = pfs.load_fs_node(&old_hash).expect("to find node");
