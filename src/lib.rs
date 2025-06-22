@@ -140,8 +140,6 @@ pub struct DirectoryEntry {
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct Directory {
     pub entries: Vec<DirectoryEntry>,
-    #[serde(skip_serializing, skip_deserializing)]
-    pub parent_inode_number: Option<InodeNumber>,
 }
 
 impl Directory {
@@ -212,7 +210,20 @@ impl Pfs {
                 runtime_data.directories.clear();
                 runtime_data.inodes = vec![FsNode::default(); 1];
             }
-            let fs_node = pfs.new_directory_node(Directory::default(), None);
+            let initial_directory = Directory::default();
+            let fs_node = FsNode {
+                content_hash: initial_directory.calculate_hash(),
+                modification_time: DateTime::<Utc>::default(),
+                kind: FileType::Directory,
+                parent_inode_number: None,
+                size: 0,
+            };
+            pfs.persist_directory(&initial_directory)?;
+            pfs.persist_fs_node(&fs_node)?;
+            pfs.runtime_data
+                .write()
+                .directories
+                .insert(fs_node.content_hash, initial_directory);
             pfs.assign_inode_number(fs_node.clone());
             if let Err(e) = pfs.persist_root_hash(&fs_node.calculate_hash()) {
                 error!("Failed to persist root hash: {}", e);
@@ -337,7 +348,6 @@ impl Pfs {
         // Load the directory contents
         let old_directory = self.load_directory(&old_dir_node.content_hash)?;
         let mut new_directory = self.load_directory(&new_dir_node.content_hash)?;
-        new_directory.parent_inode_number = old_directory.parent_inode_number;
 
         // Compare entries and handle changes
         for new_entry in &mut new_directory.entries {
@@ -348,11 +358,11 @@ impl Pfs {
                 let old_fs_node = self.load_fs_node(&old_entry.fs_node_hash)?;
 
                 if old_fs_node.is_directory() && new_fs_node.is_directory() {
-                    let _ = self.update_directory_recursive(
+                    self.update_directory_recursive(
                         &old_fs_node.calculate_hash(),
                         &new_fs_node.calculate_hash(),
                         old_entry.inode_number,
-                    );
+                    )?;
                     new_entry.inode_number = old_entry.inode_number;
                 } else if !old_fs_node.is_directory() && new_fs_node.is_directory() {
                     // Assign a new inode number for this entry
@@ -375,6 +385,7 @@ impl Pfs {
             .write()
             .directories
             .insert(new_dir_node.content_hash, new_directory);
+        self.runtime_data.write().inodes[inode_number.0 as usize] = new_dir_node;
 
         Ok(())
     }
@@ -411,9 +422,6 @@ impl Pfs {
             // Load the directory structure
             match self.load_directory(&fs_node.content_hash) {
                 Ok(mut directory) => {
-                    // Update the parent inode number
-                    directory.parent_inode_number = parent_inode_number;
-
                     // Restore each entry in the directory, updating with correct inode numbers
                     for entry in &mut directory.entries {
                         let child_inode_number =
@@ -797,10 +805,6 @@ impl Filesystem for Pfs {
         lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
-        debug!(
-            "Called write with ino: {} fh: {} offset: {} write_flags: {} flags: {} lock_owner: {:?}",
-            ino, fh, offset, write_flags, flags, lock_owner
-        );
         let mut runtime_data = self.runtime_data.write();
         let open_file = runtime_data.open_files[fh as usize].as_mut().unwrap();
         let _ = open_file.backing_file.write_at(data, offset as u64);
@@ -856,7 +860,6 @@ impl Filesystem for Pfs {
             if n == 0 {
                 break;
             };
-            debug!("Read {} bytes to feed to hasher", n);
             hasher.update(&buf[..n]);
             size += n as u64;
         }
