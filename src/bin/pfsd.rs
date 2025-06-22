@@ -194,6 +194,8 @@ async fn listen_for_updates(
                         InodeNumber(1),
                     ) {
                         error!("Unable to update root hash: {}", e);
+                    } else {
+                        info!("New root hash is {}", pfs.get_root_node().calculate_hash());
                     }
                 }
                 Messages::Hello(root_hash) => {

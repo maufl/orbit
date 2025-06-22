@@ -26,6 +26,12 @@ pub mod network;
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
 pub struct ContentHash([u8; 32]);
 
+impl Display for ContentHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ct-{}", hex::encode(self.0))
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
 pub struct FsNodeHash(pub [u8; 32]);
 
@@ -62,7 +68,7 @@ pub struct FsNode {
     pub content_hash: ContentHash,
     /// Kind of file
     pub kind: FileType,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip)]
     pub parent_inode_number: Option<InodeNumber>,
 }
 
@@ -133,7 +139,7 @@ impl FsNode {
 pub struct DirectoryEntry {
     name: String,
     fs_node_hash: FsNodeHash,
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip)]
     inode_number: InodeNumber,
 }
 
@@ -325,7 +331,7 @@ impl Pfs {
             return Ok(directory);
         }
         Err(anyhow::anyhow!(
-            "Directory with hash {:?} not found",
+            "Directory with hash {} not found",
             content_hash
         ))
     }
@@ -386,6 +392,9 @@ impl Pfs {
             .directories
             .insert(new_dir_node.content_hash, new_directory);
         self.runtime_data.write().inodes[inode_number.0 as usize] = new_dir_node;
+        if inode_number.0 == 1 {
+            self.persist_root_hash(&new_dir_node.calculate_hash())?;
+        }
 
         Ok(())
     }
@@ -397,11 +406,11 @@ impl Pfs {
             return Err("No root hash found in metadata".into());
         };
         let root_hash = ciborium::from_reader(&*value)?;
-        info!("Found root hash {:?} in persistent storage", root_hash);
+        info!("Found root hash {} in persistent storage", root_hash);
 
         // Restore the filesystem tree recursively, starting from the root
         let root_inode = self.restore_node_recursive(&root_hash, None)?;
-        info!("Restored root node to inode {:?}", root_inode);
+        info!("Restored root node to inode {}", root_inode.0);
 
         info!(
             "Successfully restored filesystem tree from persistent storage with {} inodes",
@@ -438,7 +447,7 @@ impl Pfs {
                 }
                 Err(e) => {
                     warn!(
-                        "Directory content not found for FsNode with hash {:?}: {}",
+                        "Directory content not found for FsNode with hash {}: {}",
                         fs_node.content_hash, e
                     );
                 }
@@ -453,7 +462,7 @@ impl Pfs {
         let mut value = Vec::new();
         ciborium::into_writer(fs_node, &mut value)?;
         self.fs_nodes_partition.insert(&key, &value)?;
-        debug!("Persisted FsNode with hash {:?}", node_hash);
+        debug!("Persisted FsNode with hash {}", node_hash);
         Ok(())
     }
 
@@ -462,7 +471,7 @@ impl Pfs {
         let mut value = Vec::new();
         ciborium::into_writer(root_hash, &mut value)?;
         self.fs_nodes_partition.insert(key, &value)?;
-        debug!("Persisted root hash {:?}", root_hash);
+        debug!("Persisted root hash {}", root_hash);
         Ok(())
     }
 
@@ -475,7 +484,7 @@ impl Pfs {
         let mut value = Vec::new();
         ciborium::into_writer(directory, &mut value)?;
         self.directories_partition.insert(&key, &value)?;
-        debug!("Persisted Directory with content hash {:?}", content_hash);
+        debug!("Persisted Directory with content hash {}", content_hash);
         Ok(())
     }
 
