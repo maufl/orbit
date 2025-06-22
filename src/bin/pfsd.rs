@@ -61,6 +61,10 @@ async fn main() -> Result<(), anyhow::Error> {
     let (shutdown_sender, shutdown_receiver) = tokio::sync::broadcast::channel(1);
     let (sender, receiver) = tokio::sync::broadcast::channel(10);
     let pfs = initialize_pfs(&config, Some(sender.clone()));
+    info!(
+        "Current root hash is {}",
+        pfs.get_root_node().calculate_hash()
+    );
     {
         let pfs = pfs.clone();
         let mount_point = config.mount_point.clone();
@@ -111,9 +115,7 @@ async fn accept_connections(
     sender: Sender<(FsNodeHash, FsNodeHash)>,
 ) -> Result<(), anyhow::Error> {
     while let Some(incommig) = endpoint.accept().await {
-        debug!("Incomming connection from {}", incommig.remote_address());
         if let Ok(conn) = incommig.await {
-            debug!("Acceping connection from {:?}", conn.remote_node_id());
             let pfs = pfs.clone();
             let receiver = sender.subscribe();
             let (net_sender, net_receiver) = conn.accept_bi().await?;
@@ -194,7 +196,21 @@ async fn listen_for_updates(
                         error!("Unable to update root hash: {}", e);
                     }
                 }
-                Messages::Hello => debug!("Received Hello message from peer"),
+                Messages::Hello(root_hash) => {
+                    let root_hash = FsNodeHash(root_hash);
+                    debug!(
+                        "Received Hello message from peer, their root hash is {}",
+                        root_hash
+                    );
+                    if let Err(err) = pfs.load_fs_node(&root_hash) {
+                        info!(
+                            "The remotes root node {} is unknown to us: {}",
+                            root_hash, err
+                        );
+                    } else {
+                        debug!("We know this remote root node!");
+                    };
+                }
             }
         }
     }
@@ -207,8 +223,9 @@ async fn forward_root_hash(
     pfs: Pfs,
 ) -> Result<(), anyhow::Error> {
     debug!("Sending hello");
+    let root_node_hash = pfs.get_root_node().calculate_hash();
     let _ = net_sender
-        .write_chunk(serialize_message(&Messages::Hello))
+        .write_chunk(serialize_message(&Messages::Hello(root_node_hash.0)))
         .await;
     while let Ok((old_hash, new_hash)) = recv.recv().await {
         info!("Root hash changes, sending updates to peer");

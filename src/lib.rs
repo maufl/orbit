@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    fmt::Display,
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::FileExt,
@@ -27,6 +28,12 @@ pub struct ContentHash([u8; 32]);
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
 pub struct FsNodeHash(pub [u8; 32]);
+
+impl Display for FsNodeHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "fsn-{}", hex::encode(self.0))
+    }
+}
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
 pub struct InodeNumber(pub u64);
@@ -298,10 +305,7 @@ impl Pfs {
             let fs_node: FsNode = ciborium::from_reader(&*value)?;
             return Ok(fs_node);
         }
-        Err(anyhow::anyhow!(
-            "FsNode with hash {:?} not found",
-            node_hash
-        ))
+        Err(anyhow::anyhow!("FsNode with hash {} not found", node_hash))
     }
 
     fn load_directory(&self, content_hash: &ContentHash) -> Result<Directory, anyhow::Error> {
@@ -390,7 +394,7 @@ impl Pfs {
 
         info!(
             "Successfully restored filesystem tree from persistent storage with {} inodes",
-            self.runtime_data.read().inodes.len()
+            self.runtime_data.read().inodes.len() - 1 // index 0 is not a valid FS node
         );
         Ok(())
     }
@@ -403,21 +407,15 @@ impl Pfs {
         let mut fs_node = self.load_fs_node(fs_node_hash)?;
         fs_node.parent_inode_number = parent_inode_number;
         let inode_number = self.assign_inode_number(fs_node);
-        debug!(
-            "Restored fs_node with hash {:?} to inode {:?}, type: {:?}",
-            fs_node_hash, inode_number, fs_node.kind
-        );
         if fs_node.is_directory() {
             // Load the directory structure
             match self.load_directory(&fs_node.content_hash) {
                 Ok(mut directory) => {
-                    debug!("Loading directory with {} entries", directory.entries.len());
                     // Update the parent inode number
                     directory.parent_inode_number = parent_inode_number;
 
                     // Restore each entry in the directory, updating with correct inode numbers
                     for entry in &mut directory.entries {
-                        debug!("Restoring directory entry: {}", entry.name);
                         let child_inode_number =
                             self.restore_node_recursive(&entry.fs_node_hash, Some(inode_number))?;
                         // Update the entry with the correct inode number
