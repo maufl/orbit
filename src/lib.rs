@@ -790,8 +790,11 @@ impl Filesystem for Pfs {
                 + "/"
                 + &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(content_hash.0),
         );
+        let Ok(backing_file) = File::open(&path) else {
+            return reply.error(libc::ENOENT);
+        };
         let open_file = OpenFile {
-            backing_file: File::open(&path).unwrap(),
+            backing_file,
             parent_inode_number: fs_node.parent_inode_number.unwrap(),
             path,
             writable,
@@ -805,13 +808,13 @@ impl Filesystem for Pfs {
     fn write(
         &mut self,
         _req: &fuser::Request<'_>,
-        ino: u64,
+        _ino: u64,
         fh: u64,
         offset: i64,
         data: &[u8],
-        write_flags: u32,
-        flags: i32,
-        lock_owner: Option<u64>,
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
         let mut runtime_data = self.runtime_data.write();
@@ -920,6 +923,7 @@ impl Filesystem for Pfs {
                 );
             }
         }
+        warn!("Lookup failed for {} in {}", name.to_str().unwrap(), parent);
         return reply.error(libc::ENOENT);
     }
 
