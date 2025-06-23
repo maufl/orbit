@@ -54,3 +54,65 @@
 - **Serialization**: `serde`, `ciborium` (CBOR), `toml`
 - **Networking**: `iroh` (peer-to-peer), `tokio` (async runtime)
 - **Utilities**: `anyhow` (error handling), `clap` (CLI), `hex`, `base64`, `chrono`
+
+## Advanced Architecture & Refactoring Learnings
+
+### Trait Abstraction for Persistence
+- **Persistence Trait**: Created `Persistence` trait in `src/persistence.rs` to abstract database operations
+- **Trait Objects**: Use `Arc<dyn Persistence>` for shared ownership of trait objects
+- **Error Standardization**: All persistence methods return `anyhow::Error` consistently
+- **Module Separation**: Moved all persistence logic into dedicated module for better organization
+
+### Business Logic Separation
+- **Method Naming**: Created `pfs_*` methods (e.g., `pfs_getattr`, `pfs_readdir`) for core business logic
+- **Return Types**: Business logic methods return `Result<_, libc::c_int>` for proper FUSE error handling
+- **FUSE Abstraction**: Filesystem trait implementations call business logic methods and handle protocol concerns
+- **Public vs Private**: Business logic methods can be private since they're only used internally
+
+### Type Safety & Data Structures
+- **Error Types**: Use `libc::c_int` instead of `i32` for error codes to match FUSE expectations
+- **Named Structs**: Created `DirectoryEntryInfo` struct to replace tuples in directory operations
+- **Field Visibility**: Made `DirectoryEntry` fields public for testing and external access
+- **Type Consistency**: Ensure all methods use consistent error and return types
+
+## Critical Bug Fixes & Debugging Insights
+
+### Network Synchronization Issues
+- **Root Cause**: `update_directory_recursive` was loading old directory from persistence instead of runtime state
+- **Persistence vs Runtime**: Persistence stores placeholder `InodeNumber(0)` values; runtime has real inode assignments
+- **State Management**: Must use runtime state for old directories to preserve correct inode mappings
+- **Inode Continuity**: Network sync must maintain inode number consistency to prevent "file not found" errors
+
+### Parent Reference Management
+- **Serialization Issue**: FsNodes loaded from persistence have `parent_inode_number: None` due to `#[serde(skip)]`
+- **Manual Assignment**: Must explicitly set parent references when loading nodes from persistence
+- **Directory Updates**: Both file nodes and directory nodes need parent references corrected during updates
+- **Lookup Dependencies**: Proper parent references are critical for FUSE lookup and traversal operations
+
+### Testing & Validation Strategies
+- **Integration Tests**: Create tests that exercise persistence layer directly with `persist_fs_node`/`persist_directory`
+- **Network Simulation**: Write tests that simulate network sync scenarios using `update_directory_recursive`
+- **State Verification**: Test both `readdir`, `lookup`, and `getattr` operations after directory updates
+- **Debug Tracing**: Add debug output to trace inode assignments and identify state inconsistencies
+
+## FUSE Filesystem Implementation Details
+
+### Operation Flow Understanding
+- **ls Command Flow**: `ls` uses both `readdir` (list files) and `getattr`/`lookup` (get attributes)
+- **Error Patterns**: Files visible in `readdir` but failing `lookup` indicates inode/state consistency issues
+- **Error Codes**: Different FUSE error codes (`ENOENT`, `ENOTDIR`) have specific semantic meanings
+- **Logging Strategy**: Remove unconditional debug logs, use warnings for actual errors
+
+### Content-Addressable Storage Challenges
+- **Dual Addressing**: Must maintain both content hashes (content addressing) and inode numbers (POSIX interface)
+- **State Synchronization**: Persistence layer and runtime state serve different purposes and must stay coordinated
+- **Network Coordination**: Distributed updates require careful sequencing of content persistence and inode management
+- **Recovery Patterns**: Startup recovery (`restore_node_recursive`) works differently than live updates (`update_directory_recursive`)
+
+## System Design Insights
+
+### Distributed Filesystem Complexity
+- **Multi-Phase Updates**: Network sync involves persist content → update directories → maintain inode consistency
+- **State Invariants**: All state transitions must preserve filesystem invariants throughout the process
+- **Dual Code Paths**: Both restart recovery and live update paths must correctly handle the same data
+- **Consistency Models**: Runtime state represents current truth; persistence provides durability and sync capability
