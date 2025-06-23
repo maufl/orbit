@@ -710,3 +710,118 @@ fn test_diff_comprehensive_scenario() {
 
     drop(guard);
 }
+
+#[test]
+fn test_update_directory_recursive_with_persistence() {
+    use pfs::{ContentHash, Directory, DirectoryEntry, FileType, FsNode, InodeNumber};
+    use chrono::Utc;
+
+    let uuid = uuid::Uuid::new_v4();
+    let data_dir = format!("/tmp/{}/pfs_data", uuid);
+    std::fs::create_dir_all(&data_dir).expect("To create the data dir");
+    let mut fs = Pfs::initialize(data_dir, None).expect("Failed to initialize filesystem");
+
+    // Get the initial empty root directory
+    let initial_root_node = fs.get_root_node();
+    let initial_root_hash = initial_root_node.calculate_hash();
+
+    // Create a new file node with default content hash
+    let file_content_hash = ContentHash::default(); 
+    let file_node = FsNode {
+        size: 100,
+        modification_time: Utc::now(),
+        content_hash: file_content_hash,
+        kind: FileType::RegularFile,
+        parent_inode_number: None, // Will be set when added to directory
+    };
+
+    // Persist the file node
+    fs.persistence.persist_fs_node(&file_node).expect("To persist file node");
+
+    // Create a directory that contains the file
+    let directory_entry = DirectoryEntry {
+        name: "test_file.txt".to_string(),
+        fs_node_hash: file_node.calculate_hash(),
+        inode_number: InodeNumber(0), // Placeholder, will be updated by update_directory_recursive
+    };
+
+    let new_directory = Directory {
+        entries: vec![directory_entry],
+    };
+
+    // Persist the directory
+    fs.persistence.persist_directory(&new_directory).expect("To persist directory");
+
+    // Create a new directory node that references our directory
+    let new_root_node = FsNode {
+        size: 0,
+        modification_time: Utc::now(),
+        content_hash: new_directory.calculate_hash(),
+        kind: FileType::Directory,
+        parent_inode_number: None,
+    };
+
+    // Persist the new root node
+    fs.persistence.persist_fs_node(&new_root_node).expect("To persist new root node");
+
+    let new_root_hash = new_root_node.calculate_hash();
+
+    // Now use update_directory_recursive to update the root folder
+    fs.update_directory_recursive(&initial_root_hash, &new_root_hash, InodeNumber(1))
+        .expect("To update directory recursive");
+
+    // Verify the update worked by checking the root node
+    let updated_root = fs.get_root_node();
+    assert_eq!(updated_root.content_hash, new_directory.calculate_hash());
+
+    // Since we can't access private methods, let's verify by using the public diff method
+    // to see that our changes are properly detected
+    let (_fs_nodes, directories) = fs.diff(&initial_root_node, &updated_root);
+    
+    // We should have at least one directory change (the root directory)
+    assert!(!directories.is_empty(), "Should have directory changes");
+    
+    // The last directory in the list should be our new root directory
+    let new_root_directory = &directories[directories.len() - 1];
+    assert_eq!(new_root_directory.entries.len(), 1, "Should have exactly one entry in the new directory");
+    
+    // Verify the directory calculates to the same hash as our new directory
+    assert_eq!(new_root_directory.calculate_hash(), new_directory.calculate_hash(), "Directory hashes should match");
+    
+    // Most importantly, verify that the root content hash changed from empty to containing our file
+    assert_ne!(initial_root_node.content_hash, updated_root.content_hash, "Root content hash should have changed");
+    assert_eq!(updated_root.content_hash, new_directory.calculate_hash(), "Root should now contain our new directory");
+    
+    // Test filesystem operations on the updated root directory
+    
+    // 1. Use pfs_readdir to list contents of root folder (inode 1)
+    let dir_entries = fs.pfs_readdir(1, 0).expect("To read root directory");
+    
+    // Should have entries: ".", "..", and "test_file.txt"
+    assert_eq!(dir_entries.len(), 3, "Should have 3 entries: ., .., and test_file.txt");
+    
+    // Find our file entry
+    let file_entry = dir_entries.iter()
+        .find(|entry| entry.name == "test_file.txt")
+        .expect("Should find test_file.txt in directory listing");
+    
+    assert_eq!(file_entry.file_type, fuser::FileType::RegularFile, "Should be a regular file");
+    let file_inode = file_entry.ino;
+    
+    // 2. Use pfs_lookup to find the file by name
+    let lookup_attrs = fs.pfs_lookup(1, "test_file.txt").expect("To lookup test_file.txt");
+    assert_eq!(lookup_attrs.ino, file_inode, "Lookup should return same inode as readdir");
+    assert_eq!(lookup_attrs.kind, fuser::FileType::RegularFile, "Lookup should show regular file");
+    assert_eq!(lookup_attrs.size, 100, "File size should be 100 as we set it");
+    
+    // 3. Use pfs_getattr to get file attributes by inode
+    let file_attrs = fs.pfs_getattr(file_inode).expect("To get file attributes");
+    assert_eq!(file_attrs.ino, file_inode, "Getattr should return correct inode");
+    assert_eq!(file_attrs.kind, fuser::FileType::RegularFile, "Getattr should show regular file");
+    assert_eq!(file_attrs.size, 100, "Getattr should show correct file size");
+    
+    // Verify that lookup and getattr return consistent information
+    assert_eq!(lookup_attrs.ino, file_attrs.ino, "Lookup and getattr should agree on inode");
+    assert_eq!(lookup_attrs.size, file_attrs.size, "Lookup and getattr should agree on size");
+    assert_eq!(lookup_attrs.kind, file_attrs.kind, "Lookup and getattr should agree on file type");
+}

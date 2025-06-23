@@ -139,10 +139,10 @@ impl FsNode {
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct DirectoryEntry {
-    name: String,
-    fs_node_hash: FsNodeHash,
+    pub name: String,
+    pub fs_node_hash: FsNodeHash,
     #[serde(skip)]
-    inode_number: InodeNumber,
+    pub inode_number: InodeNumber,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -579,7 +579,7 @@ impl Pfs {
     }
 
     // Business logic methods without FUSE-specific handling
-    fn pfs_getattr(&self, ino: u64) -> Result<FileAttr, libc::c_int> {
+    pub fn pfs_getattr(&self, ino: u64) -> Result<FileAttr, libc::c_int> {
         let runtime_data = self.runtime_data.read();
         let Some(fs_node) = runtime_data.inodes.get(ino as usize) else {
             return Err(libc::ENOENT);
@@ -588,7 +588,7 @@ impl Pfs {
         Ok(attrs)
     }
 
-    fn pfs_readdir(&self, ino: u64, offset: i64) -> Result<Vec<DirectoryEntryInfo>, libc::c_int> {
+    pub fn pfs_readdir(&self, ino: u64, offset: i64) -> Result<Vec<DirectoryEntryInfo>, libc::c_int> {
         let (fs_node, directory) = self.get_directory(ino)?;
         let mut entries = Vec::new();
 
@@ -789,7 +789,7 @@ impl Pfs {
         Ok(())
     }
 
-    fn pfs_lookup(&self, parent: u64, name: &str) -> Result<FileAttr, libc::c_int> {
+    pub fn pfs_lookup(&self, parent: u64, name: &str) -> Result<FileAttr, libc::c_int> {
         let (_fs_node, directory) = self.get_directory(parent)?;
         let runtime_data = self.runtime_data.read();
         for entry in directory.entries.iter() {
