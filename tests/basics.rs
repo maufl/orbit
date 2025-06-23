@@ -825,3 +825,312 @@ fn test_update_directory_recursive_with_persistence() {
     assert_eq!(lookup_attrs.size, file_attrs.size, "Lookup and getattr should agree on size");
     assert_eq!(lookup_attrs.kind, file_attrs.kind, "Lookup and getattr should agree on file type");
 }
+
+#[test]
+fn test_update_directory_recursive_preserves_parent_references() {
+    use pfs::{ContentHash, Directory, DirectoryEntry, FileType, FsNode, InodeNumber};
+    use chrono::Utc;
+
+    let uuid = uuid::Uuid::new_v4();
+    let data_dir = format!("/tmp/{}/pfs_data", uuid);
+    std::fs::create_dir_all(&data_dir).expect("To create the data dir");
+    let mut fs = Pfs::initialize(data_dir, None).expect("Failed to initialize filesystem");
+
+    // Create initial directory with a file
+    let file1_node = FsNode {
+        size: 50,
+        modification_time: Utc::now(),
+        content_hash: ContentHash::default(),
+        kind: FileType::RegularFile,
+        parent_inode_number: None,
+    };
+    fs.persistence.persist_fs_node(&file1_node).expect("To persist file1 node");
+
+    let initial_directory = Directory {
+        entries: vec![DirectoryEntry {
+            name: "file1.txt".to_string(),
+            fs_node_hash: file1_node.calculate_hash(),
+            inode_number: InodeNumber(0),
+        }],
+    };
+    fs.persistence.persist_directory(&initial_directory).expect("To persist initial directory");
+
+    let initial_root_node = FsNode {
+        size: 0,
+        modification_time: Utc::now(),
+        content_hash: initial_directory.calculate_hash(),
+        kind: FileType::Directory,
+        parent_inode_number: None,
+    };
+    fs.persistence.persist_fs_node(&initial_root_node).expect("To persist initial root node");
+
+    // Set up the initial state
+    let initial_root_hash = initial_root_node.calculate_hash();
+    fs.update_directory_recursive(&fs.get_root_node().calculate_hash(), &initial_root_hash, InodeNumber(1))
+        .expect("To set up initial state");
+
+    // Now simulate updating the file (like network synchronization would do)
+    let updated_file1_node = FsNode {
+        size: 75, // Changed size
+        modification_time: Utc::now(),
+        content_hash: ContentHash::default(),
+        kind: FileType::RegularFile,
+        parent_inode_number: None, // This will be None when loaded from persistence
+    };
+    fs.persistence.persist_fs_node(&updated_file1_node).expect("To persist updated file1 node");
+
+    let updated_directory = Directory {
+        entries: vec![DirectoryEntry {
+            name: "file1.txt".to_string(),
+            fs_node_hash: updated_file1_node.calculate_hash(),
+            inode_number: InodeNumber(0), // Will be corrected
+        }],
+    };
+    fs.persistence.persist_directory(&updated_directory).expect("To persist updated directory");
+
+    let updated_root_node = FsNode {
+        size: 0,
+        modification_time: Utc::now(),
+        content_hash: updated_directory.calculate_hash(),
+        kind: FileType::Directory,
+        parent_inode_number: None,
+    };
+    fs.persistence.persist_fs_node(&updated_root_node).expect("To persist updated root node");
+
+    // Update directory recursively (like network sync would do)
+    let updated_root_hash = updated_root_node.calculate_hash();
+    fs.update_directory_recursive(&initial_root_hash, &updated_root_hash, InodeNumber(1))
+        .expect("To update directory recursive");
+
+    // Now verify that the file can be properly accessed
+    let dir_entries = fs.pfs_readdir(1, 0).expect("To read root directory");
+    let file_entry = dir_entries.iter()
+        .find(|entry| entry.name == "file1.txt")
+        .expect("Should find file1.txt in directory listing");
+
+    // The key test: lookup should work (this would fail if parent_inode_number was None)
+    let lookup_attrs = fs.pfs_lookup(1, "file1.txt").expect("To lookup file1.txt - this tests parent reference");
+    assert_eq!(lookup_attrs.size, 75, "Should show updated file size");
+    assert_eq!(lookup_attrs.ino, file_entry.ino, "Lookup and readdir should agree on inode");
+
+    // Verify getattr also works
+    let file_attrs = fs.pfs_getattr(file_entry.ino).expect("To get file attributes");
+    assert_eq!(file_attrs.size, 75, "Getattr should show updated file size");
+}
+
+#[test]
+fn test_network_sync_scenario() {
+    use pfs::{ContentHash, Directory, DirectoryEntry, FileType, FsNode, InodeNumber};
+    use chrono::Utc;
+
+    let uuid = uuid::Uuid::new_v4();
+    let data_dir = format!("/tmp/{}/pfs_data", uuid);
+    std::fs::create_dir_all(&data_dir).expect("To create the data dir");
+    let mut fs = Pfs::initialize(data_dir, None).expect("Failed to initialize filesystem");
+
+    // Simulate the initial state - empty filesystem
+    let initial_root = fs.get_root_node();
+    
+    // Now simulate receiving a file from network sync
+    let file_node = FsNode {
+        size: 1024,
+        modification_time: Utc::now(),
+        content_hash: ContentHash::default(),
+        kind: FileType::RegularFile,
+        parent_inode_number: None,
+    };
+    
+    // Network would persist this file
+    fs.persistence.persist_fs_node(&file_node).expect("To persist file node");
+    
+    // Network would persist the directory containing this file
+    let new_directory = Directory {
+        entries: vec![DirectoryEntry {
+            name: "synced_file.txt".to_string(),
+            fs_node_hash: file_node.calculate_hash(),
+            inode_number: InodeNumber(0), // This will be corrected
+        }],
+    };
+    fs.persistence.persist_directory(&new_directory).expect("To persist directory");
+    
+    // Network would persist the new root node
+    let new_root_node = FsNode {
+        size: 0,
+        modification_time: Utc::now(),
+        content_hash: new_directory.calculate_hash(),
+        kind: FileType::Directory,
+        parent_inode_number: None,
+    };
+    fs.persistence.persist_fs_node(&new_root_node).expect("To persist new root node");
+    
+    // Now simulate the network calling update_directory_recursive
+    let old_root_hash = initial_root.calculate_hash();
+    let new_root_hash = new_root_node.calculate_hash();
+    
+    fs.update_directory_recursive(&old_root_hash, &new_root_hash, InodeNumber(1))
+        .expect("To update directory recursive");
+    
+    // Now test that ls-like operations work:
+    
+    // 1. readdir should show the file
+    let entries = fs.pfs_readdir(1, 0).expect("To read directory");
+    let file_entry = entries.iter()
+        .find(|e| e.name == "synced_file.txt")
+        .expect("Should find synced_file.txt");
+    
+    println!("File entry inode: {}", file_entry.ino);
+    
+    // 2. lookup should work (this is what ls does for each file)
+    let lookup_result = fs.pfs_lookup(1, "synced_file.txt");
+    match lookup_result {
+        Ok(attrs) => {
+            println!("Lookup succeeded: inode={}, size={}", attrs.ino, attrs.size);
+            assert_eq!(attrs.size, 1024, "Should show correct size");
+        }
+        Err(e) => {
+            panic!("Lookup failed with error code: {} (this is the ls problem!)", e);
+        }
+    }
+    
+    // 3. getattr should work on the inode
+    let getattr_result = fs.pfs_getattr(file_entry.ino);
+    match getattr_result {
+        Ok(attrs) => {
+            println!("Getattr succeeded: inode={}, size={}", attrs.ino, attrs.size);
+            assert_eq!(attrs.size, 1024, "Should show correct size");
+        }
+        Err(e) => {
+            panic!("Getattr failed with error code: {} (this would cause ls issues!)", e);
+        }
+    }
+}
+
+#[test]
+fn test_network_sync_existing_file_update() {
+    use pfs::{ContentHash, Directory, DirectoryEntry, FileType, FsNode, InodeNumber};
+    use chrono::Utc;
+
+    let uuid = uuid::Uuid::new_v4();
+    let data_dir = format!("/tmp/{}/pfs_data", uuid);
+    std::fs::create_dir_all(&data_dir).expect("To create the data dir");
+    let mut fs = Pfs::initialize(data_dir, None).expect("Failed to initialize filesystem");
+
+    // Start by creating a file in the normal way (like local filesystem operations)
+    let initial_root = fs.get_root_node();
+    
+    // Create the first version of the file locally
+    let file_v1_node = FsNode {
+        size: 500,
+        modification_time: Utc::now(),
+        content_hash: ContentHash::default(),
+        kind: FileType::RegularFile,
+        parent_inode_number: None,
+    };
+    fs.persistence.persist_fs_node(&file_v1_node).expect("To persist file v1");
+    
+    let directory_v1 = Directory {
+        entries: vec![DirectoryEntry {
+            name: "shared_file.txt".to_string(),
+            fs_node_hash: file_v1_node.calculate_hash(),
+            inode_number: InodeNumber(0),
+        }],
+    };
+    fs.persistence.persist_directory(&directory_v1).expect("To persist directory v1");
+    
+    let root_v1_node = FsNode {
+        size: 0,
+        modification_time: Utc::now(),
+        content_hash: directory_v1.calculate_hash(),
+        kind: FileType::Directory,
+        parent_inode_number: None,
+    };
+    fs.persistence.persist_fs_node(&root_v1_node).expect("To persist root v1");
+    
+    // Set up the initial state with the file
+    let root_v1_hash = root_v1_node.calculate_hash();
+    fs.update_directory_recursive(&initial_root.calculate_hash(), &root_v1_hash, InodeNumber(1))
+        .expect("To set up initial state with file");
+    
+    // Verify the file works initially
+    let entries = fs.pfs_readdir(1, 0).expect("To read directory initially");
+    let file_entry_v1 = entries.iter()
+        .find(|e| e.name == "shared_file.txt")
+        .expect("Should find shared_file.txt initially");
+    
+    println!("Initial file inode: {}", file_entry_v1.ino);
+    
+    fs.pfs_lookup(1, "shared_file.txt").expect("Initial lookup should work");
+    fs.pfs_getattr(file_entry_v1.ino).expect("Initial getattr should work");
+    
+    // Now simulate network sync updating this same file (same name, different content)
+    // Create a different content hash by using a different timestamp in the hash calculation
+    let different_time = Utc::now();
+    let file_v2_node = FsNode {
+        size: 750, // Different size
+        modification_time: different_time,
+        content_hash: ContentHash::default(), // This would normally be different due to different content
+        kind: FileType::RegularFile,
+        parent_inode_number: None,
+    };
+    fs.persistence.persist_fs_node(&file_v2_node).expect("To persist file v2");
+    
+    let directory_v2 = Directory {
+        entries: vec![DirectoryEntry {
+            name: "shared_file.txt".to_string(), // Same name!
+            fs_node_hash: file_v2_node.calculate_hash(), // Different hash!
+            inode_number: InodeNumber(0), // Will be corrected
+        }],
+    };
+    fs.persistence.persist_directory(&directory_v2).expect("To persist directory v2");
+    
+    let root_v2_node = FsNode {
+        size: 0,
+        modification_time: Utc::now(),
+        content_hash: directory_v2.calculate_hash(),
+        kind: FileType::Directory,
+        parent_inode_number: None,
+    };
+    fs.persistence.persist_fs_node(&root_v2_node).expect("To persist root v2");
+    
+    // This is the critical test: update the directory with the new version
+    let root_v2_hash = root_v2_node.calculate_hash();
+    fs.update_directory_recursive(&root_v1_hash, &root_v2_hash, InodeNumber(1))
+        .expect("To update to v2 via network sync");
+    
+    // Now test if the updated file is accessible (this is where the bug manifests)
+    let entries_v2 = fs.pfs_readdir(1, 0).expect("To read directory after update");
+    let file_entry_v2 = entries_v2.iter()
+        .find(|e| e.name == "shared_file.txt")
+        .expect("Should find shared_file.txt after update");
+    
+    println!("Updated file inode: {}", file_entry_v2.ino);
+    
+    // Debug: Let's check if the issue is with inode 0
+    if file_entry_v2.ino == 0 {
+        println!("WARNING: File has inode 0, which might be invalid!");
+    }
+    
+    // The critical test: can we look up the updated file?
+    let lookup_result = fs.pfs_lookup(1, "shared_file.txt");
+    match lookup_result {
+        Ok(attrs) => {
+            println!("Lookup after update succeeded: inode={}, size={}", attrs.ino, attrs.size);
+            assert_eq!(attrs.size, 750, "Should show updated size");
+            
+            // Also test getattr
+            let getattr_result = fs.pfs_getattr(attrs.ino);
+            match getattr_result {
+                Ok(getattr_attrs) => {
+                    println!("Getattr after update succeeded: size={}", getattr_attrs.size);
+                    assert_eq!(getattr_attrs.size, 750, "Getattr should also show updated size");
+                }
+                Err(e) => {
+                    panic!("Getattr failed after update with error: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            panic!("Lookup failed after update with error code: {} - THIS IS THE BUG!", e);
+        }
+    }
+}

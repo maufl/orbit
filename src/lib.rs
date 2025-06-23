@@ -326,17 +326,22 @@ impl Pfs {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Load the old and new directory FsNodes
         let old_dir_node = self.persistence.load_fs_node(old_dir_hash)?;
-        let new_dir_node = self.persistence.load_fs_node(new_dir_hash)?;
+        let mut new_dir_node = self.persistence.load_fs_node(new_dir_hash)?;
 
         // Both should be directories
         if !old_dir_node.is_directory() || !new_dir_node.is_directory() {
             return Err("Both nodes must be directories".into());
         }
 
-        // Load the directory contents
-        let old_directory = self
-            .persistence
-            .load_directory(&old_dir_node.content_hash)?;
+        // Load the directory contents - use runtime state for old directory since it has corrected inode numbers
+        let old_directory = {
+            let runtime_data = self.runtime_data.read();
+            runtime_data
+                .directories
+                .get(&old_dir_node.content_hash)
+                .ok_or_else(|| "Old directory not found in runtime state")?
+                .clone()
+        };
         let mut new_directory = self
             .persistence
             .load_directory(&new_dir_node.content_hash)?;
@@ -362,8 +367,10 @@ impl Pfs {
                         self.restore_node_recursive(&new_entry.fs_node_hash, Some(inode_number))?;
                 } else {
                     new_entry.inode_number = old_entry.inode_number;
+                    let mut updated_fs_node = new_fs_node;
+                    updated_fs_node.parent_inode_number = Some(inode_number);
                     self.runtime_data.write().inodes[new_entry.inode_number.0 as usize] =
-                        new_fs_node;
+                        updated_fs_node;
                 }
             } else {
                 // new entry
@@ -377,6 +384,12 @@ impl Pfs {
             .write()
             .directories
             .insert(new_dir_node.content_hash, new_directory);
+
+        // Fix the parent inode number for the directory node before storing it
+        // Get the current parent from the existing node if it exists
+        if let Some(existing_node) = self.runtime_data.read().inodes.get(inode_number.0 as usize) {
+            new_dir_node.parent_inode_number = existing_node.parent_inode_number;
+        }
         self.runtime_data.write().inodes[inode_number.0 as usize] = new_dir_node;
         if inode_number.0 == 1 {
             self.persistence
@@ -588,7 +601,11 @@ impl Pfs {
         Ok(attrs)
     }
 
-    pub fn pfs_readdir(&self, ino: u64, offset: i64) -> Result<Vec<DirectoryEntryInfo>, libc::c_int> {
+    pub fn pfs_readdir(
+        &self,
+        ino: u64,
+        offset: i64,
+    ) -> Result<Vec<DirectoryEntryInfo>, libc::c_int> {
         let (fs_node, directory) = self.get_directory(ino)?;
         let mut entries = Vec::new();
 
