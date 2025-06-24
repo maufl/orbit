@@ -5,7 +5,7 @@ use iroh::PublicKey;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, NodeAddr, discovery::mdns::MdnsDiscovery};
 use pfs::config::Config;
-use pfs::network::{APLN, Messages};
+use pfs::network::{APLN, Messages, TokioNetworkCommunication};
 use pfs::{FsNodeHash, InodeNumber, Pfs};
 use std::time::Duration;
 use std::{path::PathBuf, thread};
@@ -31,7 +31,12 @@ fn initialize_pfs(config: &Config, handle: Handle, net_sender: Option<Sender<Mes
     let data_dir = &config.data_dir;
     std::fs::create_dir_all(data_dir).expect("To create the data dir");
     std::fs::create_dir_all(format!("{}/tmp", data_dir)).expect("To create the temporary file dir");
-    Pfs::initialize(data_dir.clone(), net_sender, Some(handle))
+    
+    let network_communication = net_sender.map(|sender| {
+        std::sync::Arc::new(TokioNetworkCommunication::new(sender, handle)) as std::sync::Arc<dyn pfs::network::NetworkCommunication>
+    });
+    
+    Pfs::initialize(data_dir.clone(), network_communication)
         .expect("Failed to initialize filesystem")
 }
 

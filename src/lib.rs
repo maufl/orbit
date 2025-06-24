@@ -9,7 +9,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use network::Messages;
+use network::{Messages, NetworkCommunication};
 use parking_lot::RwLock;
 
 use base64::Engine;
@@ -18,7 +18,6 @@ use fuser::{FileAttr, Filesystem};
 use libc::{O_RDWR, O_WRONLY};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
-use tokio::{runtime::Handle, sync::broadcast::Sender};
 
 use crate::persistence::{Persistence, PfsPersistence};
 
@@ -187,15 +186,13 @@ pub struct Pfs {
     runtime_data: Arc<RwLock<PfsRuntimeData>>,
     pub data_dir: String,
     pub persistence: Arc<dyn Persistence>,
-    message_sender: Option<Sender<Messages>>,
-    tokio_runtime_handle: Option<Handle>,
+    network_communication: Option<Arc<dyn NetworkCommunication>>,
 }
 
 impl Pfs {
     pub fn initialize(
         data_dir: String,
-        message_sender: Option<Sender<Messages>>,
-        tokio_runtime_handle: Option<Handle>,
+        network_communication: Option<Arc<dyn NetworkCommunication>>,
     ) -> Result<Pfs, Box<dyn std::error::Error>> {
         let persistence = Arc::new(PfsPersistence::new(&data_dir)?);
 
@@ -207,8 +204,7 @@ impl Pfs {
                 open_files: Vec::new(),
             })),
             persistence,
-            message_sender,
-            tokio_runtime_handle,
+            network_communication,
         };
 
         // Try to load existing data
@@ -593,7 +589,7 @@ impl Pfs {
     }
 
     fn sent_messages_for_changed_root(&self, old_hash: FsNodeHash) {
-        let Some(ref message_sender) = self.message_sender else {
+        let Some(ref network_comm) = self.network_communication else {
             return;
         };
         let new_hash = self.get_root_node().calculate_hash();
@@ -607,15 +603,9 @@ impl Pfs {
             .load_fs_node(&new_hash)
             .expect("to find node");
         let (updated_fs_nodes, updated_directories) = self.diff(&old_node, &new_node);
-        if let Err(e) = message_sender.send(Messages::NewFsNodes(updated_fs_nodes)) {
-            warn!("Error sending new fs nodes: {}", e);
-        }
-        if let Err(e) = message_sender.send(Messages::NewDirectories(updated_directories)) {
-            warn!("Error sending new directories: {}", e);
-        }
-        if let Err(e) = message_sender.send(Messages::RootHashChanged(new_hash.0)) {
-            warn!("Error sending changed root hash: {}", e)
-        }
+        network_comm.send_message(Messages::NewFsNodes(updated_fs_nodes));
+        network_comm.send_message(Messages::NewDirectories(updated_directories));
+        network_comm.send_message(Messages::RootHashChanged(new_hash.0));
     }
 
     // Business logic methods without FUSE-specific handling
@@ -1017,12 +1007,6 @@ impl Filesystem for Pfs {
             Ok(fh) => reply.opened(fh, 0),
             Err(error) => {
                 warn!("open failed for ino {}: {}", _ino, error);
-                if error == libc::ENOENT {
-                    if let Some(ref handle) = self.tokio_runtime_handle {
-                        handle.spawn(async move {});
-                        return;
-                    }
-                }
                 reply.error(error);
             }
         }
