@@ -16,7 +16,7 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use fuser::{FileAttr, Filesystem};
 use libc::{O_RDWR, O_WRONLY};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::persistence::{Persistence, PfsPersistence};
@@ -1007,6 +1007,32 @@ impl Filesystem for Pfs {
             Ok(fh) => reply.opened(fh, 0),
             Err(error) => {
                 warn!("open failed for ino {}: {}", _ino, error);
+                if error == libc::ENOENT {
+                    if let Some(ref net) = self.network_communication {
+                        let content_hash =
+                            self.runtime_data.read().inodes[_ino as usize].content_hash;
+                        debug!(
+                            "File {} is not present locally, requesting it from peers",
+                            content_hash
+                        );
+                        let mut pfs = self.clone();
+                        net.request_file_with_callback(
+                            content_hash,
+                            Duration::from_secs(10),
+                            Box::new(move || {
+                                debug!("It seems like we received the file {} from a peer, try opening it again", content_hash);
+                                match pfs.pfs_open(_ino, _flags) {
+                                Ok(fh) => reply.opened(fh, 0),
+                                Err(error) => {
+                                    warn!("Failed to request file {} from peers", content_hash);
+                                    reply.error(error);
+                                }
+                                }
+                            }),
+                        );
+                        return;
+                    }
+                }
                 reply.error(error);
             }
         }

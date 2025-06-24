@@ -1,16 +1,16 @@
 use base64::Engine;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use clap::Parser;
 use iroh::PublicKey;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, NodeAddr, discovery::mdns::MdnsDiscovery};
 use pfs::config::Config;
-use pfs::network::{APLN, Messages, TokioNetworkCommunication};
-use pfs::{FsNodeHash, InodeNumber, Pfs};
+use pfs::network::{APLN, Messages, NetworkCommunication, TokioNetworkCommunication};
+use pfs::{ContentHash, FsNodeHash, InodeNumber, Pfs};
+use std::io::Write;
+use std::sync::Arc;
 use std::time::Duration;
 use std::{path::PathBuf, thread};
-use tokio::runtime::Handle;
-
 use tokio::sync::broadcast::{Receiver, Sender};
 
 use log::{LevelFilter, debug, error, info, warn};
@@ -27,16 +27,12 @@ struct Args {
     remote_node: Option<String>,
 }
 
-fn initialize_pfs(config: &Config, handle: Handle, net_sender: Option<Sender<Messages>>) -> Pfs {
+fn initialize_pfs(config: &Config, network_communication: Arc<dyn NetworkCommunication>) -> Pfs {
     let data_dir = &config.data_dir;
     std::fs::create_dir_all(data_dir).expect("To create the data dir");
     std::fs::create_dir_all(format!("{}/tmp", data_dir)).expect("To create the temporary file dir");
-    
-    let network_communication = net_sender.map(|sender| {
-        std::sync::Arc::new(TokioNetworkCommunication::new(sender, handle)) as std::sync::Arc<dyn pfs::network::NetworkCommunication>
-    });
-    
-    Pfs::initialize(data_dir.clone(), network_communication)
+
+    Pfs::initialize(data_dir.clone(), Some(network_communication))
         .expect("Failed to initialize filesystem")
 }
 
@@ -67,12 +63,15 @@ async fn main() -> Result<(), anyhow::Error> {
         .await?;
     info!("Node ID is {}", endpoint.node_id());
     let (shutdown_sender, shutdown_receiver) = tokio::sync::broadcast::channel(1);
+    let (content_notification_sender, content_notification_receiver) =
+        tokio::sync::broadcast::channel(10);
     let (sender, receiver) = tokio::sync::broadcast::channel(10);
-    let pfs = initialize_pfs(
-        &config,
+    let network_communication = std::sync::Arc::new(TokioNetworkCommunication::new(
+        sender.clone(),
         tokio::runtime::Handle::current(),
-        Some(sender.clone()),
-    );
+        content_notification_receiver,
+    )) as std::sync::Arc<dyn pfs::network::NetworkCommunication>;
+    let pfs = initialize_pfs(&config, network_communication);
     info!(
         "Current root hash is {}",
         pfs.get_root_node().calculate_hash()
@@ -86,9 +85,12 @@ async fn main() -> Result<(), anyhow::Error> {
         let pfs = pfs.clone();
         let endpoint = endpoint.clone();
         let sender = sender.clone();
+        let content_notification_sender = content_notification_sender.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(10)).await;
-            if let Err(e) = accept_connections(endpoint, pfs, sender).await {
+            if let Err(e) =
+                accept_connections(endpoint, pfs, sender, content_notification_sender).await
+            {
                 warn!("Error accepting connections: {}", e);
             }
         });
@@ -105,7 +107,9 @@ async fn main() -> Result<(), anyhow::Error> {
         let node_addr = NodeAddr::new(PublicKey::from_bytes(&remote_pub_key)?);
         match endpoint.connect(node_addr, APLN.as_bytes()).await {
             Ok(conn) => {
-                if let Err(e) = open_connection(conn, pfs, receiver, sender).await {
+                if let Err(e) =
+                    open_connection(conn, pfs, receiver, sender, content_notification_sender).await
+                {
                     warn!("Error while handling new connection: {}", e);
                 }
             }
@@ -126,20 +130,28 @@ async fn accept_connections(
     endpoint: Endpoint,
     pfs: Pfs,
     sender: Sender<Messages>,
+    content_notifier: Sender<ContentHash>,
 ) -> Result<(), anyhow::Error> {
     while let Some(incommig) = endpoint.accept().await {
         if let Ok(conn) = incommig.await {
+            info!(
+                "Accepted new connection from {}",
+                conn.remote_node_id().unwrap()
+            );
             let pfs = pfs.clone();
             let receiver = sender.subscribe();
             let (net_sender, net_receiver) = conn.accept_bi().await?;
             {
                 let pfs = pfs.clone();
                 let sender = sender.clone();
-                tokio::spawn(async move { listen_for_updates(net_receiver, sender, pfs).await });
+                let content_notifier = content_notifier.clone();
+                tokio::spawn(async move {
+                    listen_for_updates(net_receiver, sender, pfs, content_notifier).await
+                });
             }
             tokio::spawn(async move { forward_messages(net_sender, receiver).await });
         } else {
-            info!("Failed to accept incomming connection");
+            warn!("Failed to accept incomming connection");
         }
     }
     Ok(())
@@ -150,14 +162,16 @@ async fn open_connection(
     pfs: Pfs,
     receiver: Receiver<Messages>,
     message_sender: Sender<Messages>,
+    content_notifier: Sender<ContentHash>,
 ) -> Result<(), anyhow::Error> {
-    debug!("Handling new connection from {}", conn.remote_node_id()?);
+    info!("Handling new connection to {}", conn.remote_node_id()?);
     let (net_sender, net_receiver) = conn.open_bi().await?;
 
     {
         let pfs = pfs.clone();
+        let content_notifier = content_notifier.clone();
         tokio::spawn(async move {
-            listen_for_updates(net_receiver, message_sender, pfs)
+            listen_for_updates(net_receiver, message_sender, pfs, content_notifier)
                 .await
                 .inspect_err(|e| warn!("Stopped listening for updates, encountered error {}", e))
         });
@@ -176,94 +190,137 @@ fn serialize_message(m: &Messages) -> Bytes {
     writer.into_inner().freeze()
 }
 
+fn process_received_message(
+    msg: Messages,
+    pfs: &mut Pfs,
+    message_sender: &Sender<Messages>,
+    content_notifier: &Sender<ContentHash>,
+) {
+    match msg {
+        Messages::NewDirectories(dirs) => {
+            for dir in dirs {
+                if let Err(e) = pfs.persistence.persist_directory(&dir) {
+                    warn!("Unable to persist directories: {}", e);
+                }
+            }
+        }
+        Messages::NewFsNodes(nodes) => {
+            for node in nodes {
+                if let Err(e) = pfs.persistence.persist_fs_node(&node) {
+                    warn!("Unable to persist FS node: {}", e);
+                }
+            }
+        }
+        Messages::RootHashChanged(new_root_hash) => {
+            let new_root_hash = FsNodeHash(new_root_hash);
+            let old_root_hash = pfs.get_root_node().calculate_hash();
+            if let Err(e) = pfs.update_directory_recursive(
+                &old_root_hash,
+                &new_root_hash,
+                InodeNumber(1),
+            ) {
+                error!("Unable to update root hash: {}", e);
+            } else {
+                info!("New root hash is {}", pfs.get_root_node().calculate_hash());
+            }
+        }
+        Messages::Hello(root_hash) => {
+            let root_hash = FsNodeHash(root_hash);
+            debug!(
+                "Received Hello message from peer, their root hash is {}",
+                root_hash
+            );
+            if let Err(err) = pfs.persistence.load_fs_node(&root_hash) {
+                info!(
+                    "The remotes root node {} is unknown to us: {}",
+                    root_hash, err
+                );
+            } else {
+                debug!("We know this remote root node!");
+            };
+        }
+        Messages::ContentRequest(requested_content) => {
+            for content_hash in requested_content.into_iter() {
+                let file_path = pfs.data_dir.clone()
+                    + "/"
+                    + &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(content_hash.0);
+                let mut buf = BytesMut::new().writer();
+                let Ok(mut file) = std::fs::File::open(&file_path) else {
+                    warn!("Failed to open file {}", file_path);
+                    continue;
+                };
+                if let Err(e) = std::io::copy(&mut file, &mut buf) {
+                    warn!("Failed to read file {}, {}", file_path, e);
+                    continue;
+                };
+                debug!("Replying with content response");
+                if let Err(e) = message_sender.send(Messages::ContentResponse((
+                    content_hash,
+                    buf.into_inner().freeze(),
+                ))) {
+                    warn!("Failed to send content message: {}", e);
+                };
+            }
+        }
+        Messages::ContentResponse((content_hash, bytes)) => {
+            let new_file_path = pfs.data_dir.clone()
+                + "/"
+                + &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(content_hash.0);
+            if let Err(e) = std::fs::write(&new_file_path, bytes.as_ref()) {
+                warn!(
+                    "Failed to write content with hash {} to path {}: {}",
+                    content_hash, new_file_path, e
+                );
+            } else {
+                if let Err(e) = content_notifier.send(content_hash) {
+                    warn!("Failed to notify about new content: {}", e)
+                }
+            };
+        }
+    }
+}
+
 async fn listen_for_updates(
     mut net_receiver: RecvStream,
     message_sender: Sender<Messages>,
     mut pfs: Pfs,
+    content_notifier: Sender<ContentHash>,
 ) -> Result<(), anyhow::Error> {
+    use bytes::Buf;
+    
+    let mut buffer = BytesMut::new();
     while let Some(chunk) = net_receiver.read_chunk(15_000, true).await? {
-        info!("Received update from peer");
-        let mut reader = chunk.bytes.reader();
-        while let Ok(msg) = ciborium::from_reader(&mut reader) {
-            debug!("Message is {:?}", msg);
-            match msg {
-                Messages::NewDirectories(dirs) => {
-                    for dir in dirs {
-                        if let Err(e) = pfs.persistence.persist_directory(&dir) {
-                            warn!("Unable to persist directories: {}", e);
-                        }
-                    }
+        // Add the new chunk to our buffer
+        let mut writer = buffer.writer();
+        writer.write_all(&chunk.bytes)?;
+        buffer = writer.into_inner();
+        
+        // Try to deserialize as many complete messages as possible
+        let mut current_buffer = buffer.freeze();
+        loop {
+            // Save the current buffer position for potential rollback (cheap clone)
+            let buffer_before = current_buffer.clone();
+            let mut reader = current_buffer.reader();
+            
+            match ciborium::from_reader::<Messages, _>(&mut reader) {
+                Ok(msg) => {
+                    // Successfully deserialized a message - process it immediately
+                    debug!("Message is {:?}", msg);
+                    current_buffer = reader.into_inner();
+                    
+                    // Process the message using the extracted function
+                    process_received_message(msg, &mut pfs, &message_sender, &content_notifier);
                 }
-                Messages::NewFsNodes(nodes) => {
-                    for node in nodes {
-                        if let Err(e) = pfs.persistence.persist_fs_node(&node) {
-                            warn!("Unable to persist FS node: {}", e);
-                        }
-                    }
-                }
-                Messages::RootHashChanged(new_root_hash) => {
-                    let new_root_hash = FsNodeHash(new_root_hash);
-                    let old_root_hash = pfs.get_root_node().calculate_hash();
-                    if let Err(e) = pfs.update_directory_recursive(
-                        &old_root_hash,
-                        &new_root_hash,
-                        InodeNumber(1),
-                    ) {
-                        error!("Unable to update root hash: {}", e);
-                    } else {
-                        info!("New root hash is {}", pfs.get_root_node().calculate_hash());
-                    }
-                }
-                Messages::Hello(root_hash) => {
-                    let root_hash = FsNodeHash(root_hash);
-                    debug!(
-                        "Received Hello message from peer, their root hash is {}",
-                        root_hash
-                    );
-                    if let Err(err) = pfs.persistence.load_fs_node(&root_hash) {
-                        info!(
-                            "The remotes root node {} is unknown to us: {}",
-                            root_hash, err
-                        );
-                    } else {
-                        debug!("We know this remote root node!");
-                    };
-                }
-                Messages::ContentRequest(requested_content) => {
-                    for content_hash in requested_content.into_iter() {
-                        let file_path = pfs.data_dir.clone()
-                            + "/"
-                            + &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(content_hash.0);
-                        let mut buf = BytesMut::new().writer();
-                        let Ok(mut file) = std::fs::File::open(&file_path) else {
-                            warn!("Failed to open file {}", file_path);
-                            continue;
-                        };
-                        if let Err(e) = std::io::copy(&mut file, &mut buf) {
-                            warn!("Failed to read file {}, {}", file_path, e);
-                            continue;
-                        };
-                        if let Err(e) = message_sender.send(Messages::ContentResponse((
-                            content_hash,
-                            buf.into_inner().freeze(),
-                        ))) {
-                            warn!("Failed to send content message: {}", e);
-                        };
-                    }
-                }
-                Messages::ContentResponse((content_hash, bytes)) => {
-                    let new_file_path = pfs.data_dir.clone()
-                        + "/"
-                        + &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(content_hash.0);
-                    if let Err(e) = std::fs::write(&new_file_path, bytes.as_ref()) {
-                        warn!(
-                            "Failed to write content with hash {} to path {}: {}",
-                            content_hash, new_file_path, e
-                        );
-                    };
+                Err(_) => {
+                    // Deserialization failed - rollback the buffer and stop trying
+                    current_buffer = buffer_before;
+                    break;
                 }
             }
         }
+        
+        // Convert remaining Bytes back to BytesMut for next iteration
+        buffer = BytesMut::from(current_buffer);
     }
     Ok(())
 }
