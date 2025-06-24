@@ -9,6 +9,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use network::Messages;
 use parking_lot::RwLock;
 
 use base64::Engine;
@@ -17,7 +18,7 @@ use fuser::{FileAttr, Filesystem};
 use libc::{O_RDWR, O_WRONLY};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast::Sender;
+use tokio::{runtime::Handle, sync::broadcast::Sender};
 
 use crate::persistence::{Persistence, PfsPersistence};
 
@@ -26,7 +27,7 @@ pub mod network;
 pub mod persistence;
 
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
-pub struct ContentHash([u8; 32]);
+pub struct ContentHash(pub [u8; 32]);
 
 impl Display for ContentHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -184,15 +185,17 @@ struct PfsRuntimeData {
 #[derive(Clone)]
 pub struct Pfs {
     runtime_data: Arc<RwLock<PfsRuntimeData>>,
-    data_dir: String,
+    pub data_dir: String,
     pub persistence: Arc<dyn Persistence>,
-    root_node_hash_sender: Option<Sender<(FsNodeHash, FsNodeHash)>>,
+    message_sender: Option<Sender<Messages>>,
+    tokio_runtime_handle: Option<Handle>,
 }
 
 impl Pfs {
     pub fn initialize(
         data_dir: String,
-        root_node_hash_sender: Option<Sender<(FsNodeHash, FsNodeHash)>>,
+        message_sender: Option<Sender<Messages>>,
+        tokio_runtime_handle: Option<Handle>,
     ) -> Result<Pfs, Box<dyn std::error::Error>> {
         let persistence = Arc::new(PfsPersistence::new(&data_dir)?);
 
@@ -204,7 +207,8 @@ impl Pfs {
                 open_files: Vec::new(),
             })),
             persistence,
-            root_node_hash_sender,
+            message_sender,
+            tokio_runtime_handle,
         };
 
         // Try to load existing data
@@ -562,7 +566,6 @@ impl Pfs {
             )?;
         } else {
             let old_root_hash = old_directory_node.calculate_hash();
-            let root_hash = new_directory_node.calculate_hash();
             // This is the root directory - persist the root hash
             if let Err(e) = self
                 .persistence
@@ -570,9 +573,7 @@ impl Pfs {
             {
                 error!("Failed to persist root hash: {}", e);
             }
-            if let Some(ref mut sender) = self.root_node_hash_sender {
-                let _ = sender.send((old_root_hash, root_hash));
-            }
+            self.sent_messages_for_changed_root(old_root_hash);
         };
         Ok(())
     }
@@ -589,6 +590,32 @@ impl Pfs {
             return Err(libc::ENOTDIR);
         };
         Ok((*fs_node, directory.clone()))
+    }
+
+    fn sent_messages_for_changed_root(&self, old_hash: FsNodeHash) {
+        let Some(ref message_sender) = self.message_sender else {
+            return;
+        };
+        let new_hash = self.get_root_node().calculate_hash();
+        info!("Root hash changes, sending updates to peer");
+        let old_node = self
+            .persistence
+            .load_fs_node(&old_hash)
+            .expect("to find node");
+        let new_node = self
+            .persistence
+            .load_fs_node(&new_hash)
+            .expect("to find node");
+        let (updated_fs_nodes, updated_directories) = self.diff(&old_node, &new_node);
+        if let Err(e) = message_sender.send(Messages::NewFsNodes(updated_fs_nodes)) {
+            warn!("Error sending new fs nodes: {}", e);
+        }
+        if let Err(e) = message_sender.send(Messages::NewDirectories(updated_directories)) {
+            warn!("Error sending new directories: {}", e);
+        }
+        if let Err(e) = message_sender.send(Messages::RootHashChanged(new_hash.0)) {
+            warn!("Error sending changed root hash: {}", e)
+        }
     }
 
     // Business logic methods without FUSE-specific handling
@@ -990,6 +1017,12 @@ impl Filesystem for Pfs {
             Ok(fh) => reply.opened(fh, 0),
             Err(error) => {
                 warn!("open failed for ino {}: {}", _ino, error);
+                if error == libc::ENOENT {
+                    if let Some(ref handle) = self.tokio_runtime_handle {
+                        handle.spawn(async move {});
+                        return;
+                    }
+                }
                 reply.error(error);
             }
         }

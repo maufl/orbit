@@ -1,3 +1,4 @@
+use base64::Engine;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use clap::Parser;
 use iroh::PublicKey;
@@ -8,6 +9,7 @@ use pfs::network::{APLN, Messages};
 use pfs::{FsNodeHash, InodeNumber, Pfs};
 use std::time::Duration;
 use std::{path::PathBuf, thread};
+use tokio::runtime::Handle;
 
 use tokio::sync::broadcast::{Receiver, Sender};
 
@@ -25,11 +27,12 @@ struct Args {
     remote_node: Option<String>,
 }
 
-fn initialize_pfs(config: &Config, net_sender: Option<Sender<(FsNodeHash, FsNodeHash)>>) -> Pfs {
+fn initialize_pfs(config: &Config, handle: Handle, net_sender: Option<Sender<Messages>>) -> Pfs {
     let data_dir = &config.data_dir;
     std::fs::create_dir_all(data_dir).expect("To create the data dir");
     std::fs::create_dir_all(format!("{}/tmp", data_dir)).expect("To create the temporary file dir");
-    Pfs::initialize(data_dir.clone(), net_sender).expect("Failed to initialize filesystem")
+    Pfs::initialize(data_dir.clone(), net_sender, Some(handle))
+        .expect("Failed to initialize filesystem")
 }
 
 #[tokio::main]
@@ -60,7 +63,11 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("Node ID is {}", endpoint.node_id());
     let (shutdown_sender, shutdown_receiver) = tokio::sync::broadcast::channel(1);
     let (sender, receiver) = tokio::sync::broadcast::channel(10);
-    let pfs = initialize_pfs(&config, Some(sender.clone()));
+    let pfs = initialize_pfs(
+        &config,
+        tokio::runtime::Handle::current(),
+        Some(sender.clone()),
+    );
     info!(
         "Current root hash is {}",
         pfs.get_root_node().calculate_hash()
@@ -73,6 +80,7 @@ async fn main() -> Result<(), anyhow::Error> {
     {
         let pfs = pfs.clone();
         let endpoint = endpoint.clone();
+        let sender = sender.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(10)).await;
             if let Err(e) = accept_connections(endpoint, pfs, sender).await {
@@ -92,7 +100,7 @@ async fn main() -> Result<(), anyhow::Error> {
         let node_addr = NodeAddr::new(PublicKey::from_bytes(&remote_pub_key)?);
         match endpoint.connect(node_addr, APLN.as_bytes()).await {
             Ok(conn) => {
-                if let Err(e) = open_connection(conn, pfs, receiver).await {
+                if let Err(e) = open_connection(conn, pfs, receiver, sender).await {
                     warn!("Error while handling new connection: {}", e);
                 }
             }
@@ -112,7 +120,7 @@ async fn main() -> Result<(), anyhow::Error> {
 async fn accept_connections(
     endpoint: Endpoint,
     pfs: Pfs,
-    sender: Sender<(FsNodeHash, FsNodeHash)>,
+    sender: Sender<Messages>,
 ) -> Result<(), anyhow::Error> {
     while let Some(incommig) = endpoint.accept().await {
         if let Ok(conn) = incommig.await {
@@ -121,9 +129,10 @@ async fn accept_connections(
             let (net_sender, net_receiver) = conn.accept_bi().await?;
             {
                 let pfs = pfs.clone();
-                tokio::spawn(async move { listen_for_updates(net_receiver, pfs).await });
+                let sender = sender.clone();
+                tokio::spawn(async move { listen_for_updates(net_receiver, sender, pfs).await });
             }
-            tokio::spawn(async move { forward_root_hash(net_sender, receiver, pfs).await });
+            tokio::spawn(async move { forward_messages(net_sender, receiver).await });
         } else {
             info!("Failed to accept incomming connection");
         }
@@ -134,7 +143,8 @@ async fn accept_connections(
 async fn open_connection(
     conn: Connection,
     pfs: Pfs,
-    receiver: Receiver<(FsNodeHash, FsNodeHash)>,
+    receiver: Receiver<Messages>,
+    message_sender: Sender<Messages>,
 ) -> Result<(), anyhow::Error> {
     debug!("Handling new connection from {}", conn.remote_node_id()?);
     let (net_sender, net_receiver) = conn.open_bi().await?;
@@ -142,13 +152,13 @@ async fn open_connection(
     {
         let pfs = pfs.clone();
         tokio::spawn(async move {
-            listen_for_updates(net_receiver, pfs)
+            listen_for_updates(net_receiver, message_sender, pfs)
                 .await
                 .inspect_err(|e| warn!("Stopped listening for updates, encountered error {}", e))
         });
     }
     tokio::spawn(async move {
-        forward_root_hash(net_sender, receiver, pfs)
+        forward_messages(net_sender, receiver)
             .await
             .inspect_err(|e| warn!("Stopped sending updated, encountered error{}", e))
     });
@@ -163,6 +173,7 @@ fn serialize_message(m: &Messages) -> Bytes {
 
 async fn listen_for_updates(
     mut net_receiver: RecvStream,
+    message_sender: Sender<Messages>,
     mut pfs: Pfs,
 ) -> Result<(), anyhow::Error> {
     while let Some(chunk) = net_receiver.read_chunk(15_000, true).await? {
@@ -213,52 +224,52 @@ async fn listen_for_updates(
                         debug!("We know this remote root node!");
                     };
                 }
+                Messages::ContentRequest(requested_content) => {
+                    for content_hash in requested_content.into_iter() {
+                        let file_path = pfs.data_dir.clone()
+                            + "/"
+                            + &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(content_hash.0);
+                        let mut buf = BytesMut::new().writer();
+                        let Ok(mut file) = std::fs::File::open(&file_path) else {
+                            warn!("Failed to open file {}", file_path);
+                            continue;
+                        };
+                        if let Err(e) = std::io::copy(&mut file, &mut buf) {
+                            warn!("Failed to read file {}, {}", file_path, e);
+                            continue;
+                        };
+                        if let Err(e) = message_sender.send(Messages::ContentResponse((
+                            content_hash,
+                            buf.into_inner().freeze(),
+                        ))) {
+                            warn!("Failed to send content message: {}", e);
+                        };
+                    }
+                }
+                Messages::ContentResponse((content_hash, bytes)) => {
+                    let new_file_path = pfs.data_dir.clone()
+                        + "/"
+                        + &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(content_hash.0);
+                    if let Err(e) = std::fs::write(&new_file_path, bytes.as_ref()) {
+                        warn!(
+                            "Failed to write content with hash {} to path {}: {}",
+                            content_hash, new_file_path, e
+                        );
+                    };
+                }
             }
         }
     }
     Ok(())
 }
 
-async fn forward_root_hash(
+async fn forward_messages(
     mut net_sender: SendStream,
-    mut recv: Receiver<(FsNodeHash, FsNodeHash)>,
-    pfs: Pfs,
+    mut message_receiver: Receiver<Messages>,
 ) -> Result<(), anyhow::Error> {
-    debug!("Sending hello");
-    let root_node_hash = pfs.get_root_node().calculate_hash();
-    let _ = net_sender
-        .write_chunk(serialize_message(&Messages::Hello(root_node_hash.0)))
-        .await;
-    while let Ok((old_hash, new_hash)) = recv.recv().await {
-        info!("Root hash changes, sending updates to peer");
-        let old_node = pfs
-            .persistence
-            .load_fs_node(&old_hash)
-            .expect("to find node");
-        let new_node = pfs
-            .persistence
-            .load_fs_node(&new_hash)
-            .expect("to find node");
-        let (updated_fs_nodes, updated_directories) = pfs.diff(&old_node, &new_node);
-        if let Err(e) = net_sender
-            .write_chunk(serialize_message(&Messages::NewFsNodes(updated_fs_nodes)))
-            .await
-        {
-            warn!("Error sending new fs nodes: {}", e);
-        }
-        if let Err(e) = net_sender
-            .write_chunk(serialize_message(&Messages::NewDirectories(
-                updated_directories,
-            )))
-            .await
-        {
-            warn!("Error sending new directories: {}", e);
-        }
-        if let Err(e) = net_sender
-            .write_chunk(serialize_message(&Messages::RootHashChanged(new_hash.0)))
-            .await
-        {
-            warn!("Error sending changed root hash: {}", e)
+    while let Ok(msg) = message_receiver.recv().await {
+        if let Err(e) = net_sender.write_chunk(serialize_message(&msg)).await {
+            warn!("Failed to send message: {}", e)
         }
     }
     Ok(())
