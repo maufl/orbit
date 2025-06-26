@@ -14,6 +14,8 @@ pub struct Config {
     pub data_dir: String,
     /// Mount point for the filesystem
     pub mount_point: String,
+    /// List of peer node IDs to connect to on startup (hex encoded)
+    pub peer_node_ids: Vec<String>,
 }
 
 impl Default for Config {
@@ -26,6 +28,7 @@ impl Default for Config {
             private_key: None,
             data_dir: format!("{}/pfs_data", data_home),
             mount_point: format!("{}/Orbit", home),
+            peer_node_ids: Vec::new(),
         }
     }
 }
@@ -54,9 +57,7 @@ impl Config {
         PathBuf::from(config_home).join("pfsd.toml")
     }
 
-    pub fn load_or_create(config_path: Option<PathBuf>) -> Result<Self, Error> {
-        let path = config_path.unwrap_or_else(Self::get_default_config_path);
-
+    pub fn load_or_create(path: PathBuf) -> Result<Self, Error> {
         let mut config = if path.exists() {
             debug!("Loading config from: {:?}", path);
             Self::load_from_file(&path)?
@@ -93,5 +94,11 @@ impl Config {
         key_array.copy_from_slice(&key_bytes);
         let secret_key = SecretKey::from_bytes(&key_array);
         Ok(secret_key)
+    }
+
+    pub fn add_peer_node_id(&mut self, node_id: String) {
+        if !self.peer_node_ids.contains(&node_id) {
+            self.peer_node_ids.push(node_id);
+        }
     }
 }
