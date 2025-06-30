@@ -25,7 +25,7 @@ pub mod config;
 pub mod network;
 pub mod persistence;
 
-#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
+#[derive(Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
 pub struct ContentHash(pub [u8; 32]);
 
 impl Display for ContentHash {
@@ -34,12 +34,24 @@ impl Display for ContentHash {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
+impl std::fmt::Debug for ContentHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+#[derive(Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
 pub struct FsNodeHash(pub [u8; 32]);
 
 impl Display for FsNodeHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "fsn-{}", hex::encode(self.0))
+    }
+}
+
+impl std::fmt::Debug for FsNodeHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(self, f)
     }
 }
 
