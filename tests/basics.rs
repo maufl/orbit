@@ -481,7 +481,7 @@ fn test_diff_added_files() {
     let new_root = fs.get_root_node();
 
     // Test diff
-    let (fs_nodes, directories) = fs.diff(&initial_root, &new_root);
+    let (fs_nodes, directories) = fs.diff(&initial_root.into(), &new_root.into());
 
     // Should detect the new file and updated root directory
     assert!(fs_nodes.len() == 2, "Should detect at least new file");
@@ -523,7 +523,7 @@ fn test_diff_changed_files() {
     let new_root = fs.get_root_node();
 
     // Test diff
-    let (fs_nodes, directories) = fs.diff(&initial_root, &new_root);
+    let (fs_nodes, directories) = fs.diff(&initial_root.into(), &new_root.into());
 
     println!("FsNodes {:?}", fs_nodes);
     println!("Directories {:?}", directories);
@@ -565,7 +565,7 @@ fn test_diff_added_directories() {
     let new_root = fs.get_root_node();
 
     // Test diff
-    let (fs_nodes, directories) = fs.diff(&initial_root, &new_root);
+    let (fs_nodes, directories) = fs.diff(&initial_root.into(), &new_root.into());
 
     // Should detect the new directory and updated root directory
     assert!(fs_nodes.len() == 2, "Should detect at least new directory");
@@ -610,7 +610,7 @@ fn test_diff_changed_directories() {
     let new_root = fs.get_root_node();
 
     // Test diff
-    let (fs_nodes, directories) = fs.diff(&initial_root, &new_root);
+    let (fs_nodes, directories) = fs.diff(&initial_root.into(), &new_root.into());
 
     // Should detect the new file, changed directory, and updated root directory
     assert_eq!(
@@ -683,7 +683,7 @@ fn test_diff_comprehensive_scenario() {
     let new_root = fs.get_root_node();
 
     // Test diff
-    let (fs_nodes, directories) = fs.diff(&initial_root, &new_root);
+    let (fs_nodes, directories) = fs.diff(&initial_root.into(), &new_root.into());
 
     // Verify we detected the changes
     assert!(
@@ -732,7 +732,6 @@ fn test_update_directory_recursive_with_persistence() {
         modification_time: Utc::now(),
         content_hash: file_content_hash,
         kind: FileType::RegularFile,
-        parent_inode_number: None, // Will be set when added to directory
     };
 
     // Persist the file node
@@ -742,7 +741,6 @@ fn test_update_directory_recursive_with_persistence() {
     let directory_entry = DirectoryEntry {
         name: "test_file.txt".to_string(),
         fs_node_hash: file_node.calculate_hash(),
-        inode_number: InodeNumber(0), // Placeholder, will be updated by update_directory_recursive
     };
 
     let new_directory = Directory {
@@ -758,7 +756,6 @@ fn test_update_directory_recursive_with_persistence() {
         modification_time: Utc::now(),
         content_hash: new_directory.calculate_hash(),
         kind: FileType::Directory,
-        parent_inode_number: None,
     };
 
     // Persist the new root node
@@ -776,7 +773,9 @@ fn test_update_directory_recursive_with_persistence() {
 
     // Since we can't access private methods, let's verify by using the public diff method
     // to see that our changes are properly detected
-    let (_fs_nodes, directories) = fs.diff(&initial_root_node, &updated_root);
+    let initial_root_fs_node: FsNode = initial_root_node.into();
+    let updated_root_fs_node: FsNode = updated_root.into();
+    let (_fs_nodes, directories) = fs.diff(&initial_root_fs_node, &updated_root_fs_node);
     
     // We should have at least one directory change (the root directory)
     assert!(!directories.is_empty(), "Should have directory changes");
@@ -842,7 +841,6 @@ fn test_update_directory_recursive_preserves_parent_references() {
         modification_time: Utc::now(),
         content_hash: ContentHash::default(),
         kind: FileType::RegularFile,
-        parent_inode_number: None,
     };
     fs.persistence.persist_fs_node(&file1_node).expect("To persist file1 node");
 
@@ -850,7 +848,6 @@ fn test_update_directory_recursive_preserves_parent_references() {
         entries: vec![DirectoryEntry {
             name: "file1.txt".to_string(),
             fs_node_hash: file1_node.calculate_hash(),
-            inode_number: InodeNumber(0),
         }],
     };
     fs.persistence.persist_directory(&initial_directory).expect("To persist initial directory");
@@ -860,7 +857,6 @@ fn test_update_directory_recursive_preserves_parent_references() {
         modification_time: Utc::now(),
         content_hash: initial_directory.calculate_hash(),
         kind: FileType::Directory,
-        parent_inode_number: None,
     };
     fs.persistence.persist_fs_node(&initial_root_node).expect("To persist initial root node");
 
@@ -875,7 +871,6 @@ fn test_update_directory_recursive_preserves_parent_references() {
         modification_time: Utc::now(),
         content_hash: ContentHash::default(),
         kind: FileType::RegularFile,
-        parent_inode_number: None, // This will be None when loaded from persistence
     };
     fs.persistence.persist_fs_node(&updated_file1_node).expect("To persist updated file1 node");
 
@@ -883,7 +878,6 @@ fn test_update_directory_recursive_preserves_parent_references() {
         entries: vec![DirectoryEntry {
             name: "file1.txt".to_string(),
             fs_node_hash: updated_file1_node.calculate_hash(),
-            inode_number: InodeNumber(0), // Will be corrected
         }],
     };
     fs.persistence.persist_directory(&updated_directory).expect("To persist updated directory");
@@ -893,7 +887,6 @@ fn test_update_directory_recursive_preserves_parent_references() {
         modification_time: Utc::now(),
         content_hash: updated_directory.calculate_hash(),
         kind: FileType::Directory,
-        parent_inode_number: None,
     };
     fs.persistence.persist_fs_node(&updated_root_node).expect("To persist updated root node");
 
@@ -937,7 +930,6 @@ fn test_network_sync_scenario() {
         modification_time: Utc::now(),
         content_hash: ContentHash::default(),
         kind: FileType::RegularFile,
-        parent_inode_number: None,
     };
     
     // Network would persist this file
@@ -948,7 +940,6 @@ fn test_network_sync_scenario() {
         entries: vec![DirectoryEntry {
             name: "synced_file.txt".to_string(),
             fs_node_hash: file_node.calculate_hash(),
-            inode_number: InodeNumber(0), // This will be corrected
         }],
     };
     fs.persistence.persist_directory(&new_directory).expect("To persist directory");
@@ -959,7 +950,6 @@ fn test_network_sync_scenario() {
         modification_time: Utc::now(),
         content_hash: new_directory.calculate_hash(),
         kind: FileType::Directory,
-        parent_inode_number: None,
     };
     fs.persistence.persist_fs_node(&new_root_node).expect("To persist new root node");
     
@@ -1024,7 +1014,6 @@ fn test_network_sync_existing_file_update() {
         modification_time: Utc::now(),
         content_hash: ContentHash::default(),
         kind: FileType::RegularFile,
-        parent_inode_number: None,
     };
     fs.persistence.persist_fs_node(&file_v1_node).expect("To persist file v1");
     
@@ -1032,7 +1021,6 @@ fn test_network_sync_existing_file_update() {
         entries: vec![DirectoryEntry {
             name: "shared_file.txt".to_string(),
             fs_node_hash: file_v1_node.calculate_hash(),
-            inode_number: InodeNumber(0),
         }],
     };
     fs.persistence.persist_directory(&directory_v1).expect("To persist directory v1");
@@ -1042,7 +1030,6 @@ fn test_network_sync_existing_file_update() {
         modification_time: Utc::now(),
         content_hash: directory_v1.calculate_hash(),
         kind: FileType::Directory,
-        parent_inode_number: None,
     };
     fs.persistence.persist_fs_node(&root_v1_node).expect("To persist root v1");
     
@@ -1070,7 +1057,6 @@ fn test_network_sync_existing_file_update() {
         modification_time: different_time,
         content_hash: ContentHash::default(), // This would normally be different due to different content
         kind: FileType::RegularFile,
-        parent_inode_number: None,
     };
     fs.persistence.persist_fs_node(&file_v2_node).expect("To persist file v2");
     
@@ -1078,7 +1064,6 @@ fn test_network_sync_existing_file_update() {
         entries: vec![DirectoryEntry {
             name: "shared_file.txt".to_string(), // Same name!
             fs_node_hash: file_v2_node.calculate_hash(), // Different hash!
-            inode_number: InodeNumber(0), // Will be corrected
         }],
     };
     fs.persistence.persist_directory(&directory_v2).expect("To persist directory v2");
@@ -1088,7 +1073,6 @@ fn test_network_sync_existing_file_update() {
         modification_time: Utc::now(),
         content_hash: directory_v2.calculate_hash(),
         kind: FileType::Directory,
-        parent_inode_number: None,
     };
     fs.persistence.persist_fs_node(&root_v2_node).expect("To persist root v2");
     
