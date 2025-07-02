@@ -477,8 +477,9 @@ impl Pfs {
                     // Assign a new inode number for this entry
                     self.restore_node_recursive(&new_entry.fs_node_hash, Some(inode_number))?
                 } else {
-                    self.runtime_data.write().inodes[old_entry.inode_number.0 as usize]
-                        .parent_inode_number = Some(inode_number);
+                    let new_fs_node = new_fs_node.as_runtime_fs_node(Some(inode_number));
+                    self.runtime_data.write().inodes[old_entry.inode_number.0 as usize] =
+                        new_fs_node;
                     old_entry.inode_number
                 }
             } else {
