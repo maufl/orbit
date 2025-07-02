@@ -10,6 +10,11 @@ pub trait Persistence: Send + Sync {
     fn persist_root_hash(&self, root_hash: &FsNodeHash) -> Result<(), anyhow::Error>;
     fn load_root_hash(&self) -> Result<FsNodeHash, anyhow::Error>;
     fn persist_all(&self) -> Result<(), anyhow::Error>;
+    fn diff(
+        &self,
+        old_root_node: &FsNode,
+        new_root_node: &FsNode,
+    ) -> (Vec<FsNode>, Vec<Directory>);
 }
 
 pub struct PfsPersistence {
@@ -98,5 +103,75 @@ impl Persistence for PfsPersistence {
     fn persist_all(&self) -> Result<(), anyhow::Error> {
         self.keyspace.persist(fjall::PersistMode::SyncAll)?;
         Ok(())
+    }
+
+    fn diff(
+        &self,
+        old_root_node: &FsNode,
+        new_root_node: &FsNode,
+    ) -> (Vec<FsNode>, Vec<Directory>) {
+        let mut fs_nodes = Vec::new();
+        let mut directories = Vec::new();
+        self.diff_recursive(
+            old_root_node,
+            new_root_node,
+            &mut fs_nodes,
+            &mut directories,
+        );
+        (fs_nodes, directories)
+    }
+}
+
+impl PfsPersistence {
+    fn diff_recursive(
+        &self,
+        old_dir_node: &FsNode,
+        new_dir_node: &FsNode,
+        fs_nodes: &mut Vec<FsNode>,
+        directories: &mut Vec<Directory>,
+    ) {
+        let old_directory = self
+            .load_directory(&old_dir_node.content_hash)
+            .unwrap();
+        let new_directory = self
+            .load_directory(&new_dir_node.content_hash)
+            .unwrap();
+        for entry in new_directory.entries.iter() {
+            if !old_directory.entries.iter().any(|e| e.name == entry.name) {
+                // New entry!
+                let new_fs_node = self.load_fs_node(&entry.fs_node_hash).unwrap();
+                if new_fs_node.is_directory() {
+                    // Simplification, we assume that directories will always be created empty and that we don't need to recurse
+                    let new_directory = self
+                        .load_directory(&new_fs_node.content_hash)
+                        .unwrap();
+                    directories.push(new_directory);
+                }
+                fs_nodes.push(new_fs_node);
+            }
+            if old_directory
+                .entries
+                .iter()
+                .any(|e| e.name == entry.name && e.fs_node_hash != entry.fs_node_hash)
+            {
+                // Changed entry!
+                let changed_fs_node = self.load_fs_node(&entry.fs_node_hash).unwrap();
+                if changed_fs_node.is_directory() {
+                    let old_entry = old_directory
+                        .entries
+                        .iter()
+                        .find(|e| e.name == entry.name)
+                        .unwrap();
+                    let old_fs_node = self
+                        .load_fs_node(&old_entry.fs_node_hash)
+                        .expect("To find old RuntimeFsNode");
+                    self.diff_recursive(&old_fs_node, &changed_fs_node, fs_nodes, directories);
+                } else {
+                    fs_nodes.push(changed_fs_node);
+                };
+            }
+        }
+        fs_nodes.push(new_dir_node.clone());
+        directories.push(new_directory);
     }
 }

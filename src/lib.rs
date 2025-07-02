@@ -357,77 +357,6 @@ impl Pfs {
         self.runtime_data.read().inodes[1]
     }
 
-    pub fn diff(
-        &self,
-        old_root_node: &FsNode,
-        new_root_node: &FsNode,
-    ) -> (Vec<FsNode>, Vec<Directory>) {
-        let mut fs_nodes = Vec::new();
-        let mut directories = Vec::new();
-        self.diff_recursive(
-            old_root_node,
-            new_root_node,
-            &mut fs_nodes,
-            &mut directories,
-        );
-        (fs_nodes, directories)
-    }
-
-    fn diff_recursive(
-        &self,
-        old_dir_node: &FsNode,
-        new_dir_node: &FsNode,
-        fs_nodes: &mut Vec<FsNode>,
-        directories: &mut Vec<Directory>,
-    ) {
-        let old_directory = self
-            .persistence
-            .load_directory(&old_dir_node.content_hash)
-            .unwrap();
-        let new_directory = self
-            .persistence
-            .load_directory(&new_dir_node.content_hash)
-            .unwrap();
-        for entry in new_directory.entries.iter() {
-            if !old_directory.entries.iter().any(|e| e.name == entry.name) {
-                // New entry!
-                let new_fs_node = self.persistence.load_fs_node(&entry.fs_node_hash).unwrap();
-                if new_fs_node.is_directory() {
-                    // Simplification, we assume that directories will always be created empty and that we don't need to recurse
-                    let new_directory = self
-                        .persistence
-                        .load_directory(&new_fs_node.content_hash)
-                        .unwrap();
-                    directories.push(new_directory);
-                }
-                fs_nodes.push(new_fs_node);
-            }
-            if old_directory
-                .entries
-                .iter()
-                .any(|e| e.name == entry.name && e.fs_node_hash != entry.fs_node_hash)
-            {
-                // Changed entry!
-                let changed_fs_node = self.persistence.load_fs_node(&entry.fs_node_hash).unwrap();
-                if changed_fs_node.is_directory() {
-                    let old_entry = old_directory
-                        .entries
-                        .iter()
-                        .find(|e| e.name == entry.name)
-                        .unwrap();
-                    let old_fs_node = self
-                        .persistence
-                        .load_fs_node(&old_entry.fs_node_hash)
-                        .expect("To find old RuntimeFsNode");
-                    self.diff_recursive(&old_fs_node, &changed_fs_node, fs_nodes, directories);
-                } else {
-                    fs_nodes.push(changed_fs_node);
-                };
-            }
-        }
-        fs_nodes.push(new_dir_node.clone());
-        directories.push(new_directory);
-    }
 
     pub fn update_directory_recursive(
         &mut self,
@@ -722,7 +651,7 @@ impl Pfs {
             .persistence
             .load_fs_node(&new_hash)
             .expect("to find node");
-        let (updated_fs_nodes, updated_directories) = self.diff(&old_node, &new_node);
+        let (updated_fs_nodes, updated_directories) = self.persistence.diff(&old_node, &new_node);
         network_comm.send_message(Messages::NewFsNodes(updated_fs_nodes));
         network_comm.send_message(Messages::NewDirectories(updated_directories));
         network_comm.send_message(Messages::RootHashChanged(new_hash.0));

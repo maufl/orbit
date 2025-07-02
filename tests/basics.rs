@@ -568,7 +568,7 @@ fn test_diff_added_files() {
     let new_root = fs.get_root_node();
 
     // Test diff
-    let (fs_nodes, directories) = fs.diff(&initial_root.into(), &new_root.into());
+    let (fs_nodes, directories) = fs.persistence.diff(&initial_root.into(), &new_root.into());
 
     // Should detect the new file and updated root directory
     assert!(fs_nodes.len() == 2, "Should detect at least new file");
@@ -609,7 +609,7 @@ fn test_diff_changed_files() {
     let new_root = fs.get_root_node();
 
     // Test diff
-    let (fs_nodes, directories) = fs.diff(&initial_root.into(), &new_root.into());
+    let (fs_nodes, directories) = fs.persistence.diff(&initial_root.into(), &new_root.into());
 
     println!("FsNodes {:?}", fs_nodes);
     println!("Directories {:?}", directories);
@@ -650,7 +650,7 @@ fn test_diff_added_directories() {
     let new_root = fs.get_root_node();
 
     // Test diff
-    let (fs_nodes, directories) = fs.diff(&initial_root.into(), &new_root.into());
+    let (fs_nodes, directories) = fs.persistence.diff(&initial_root.into(), &new_root.into());
 
     // Should detect the new directory and updated root directory
     assert!(fs_nodes.len() == 2, "Should detect at least new directory");
@@ -694,7 +694,7 @@ fn test_diff_changed_directories() {
     let new_root = fs.get_root_node();
 
     // Test diff
-    let (fs_nodes, directories) = fs.diff(&initial_root.into(), &new_root.into());
+    let (fs_nodes, directories) = fs.persistence.diff(&initial_root.into(), &new_root.into());
 
     // Should detect the new file, changed directory, and updated root directory
     assert_eq!(
@@ -766,7 +766,7 @@ fn test_diff_comprehensive_scenario() {
     let new_root = fs.get_root_node();
 
     // Test diff
-    let (fs_nodes, directories) = fs.diff(&initial_root.into(), &new_root.into());
+    let (fs_nodes, directories) = fs.persistence.diff(&initial_root.into(), &new_root.into());
 
     // Verify we detected the changes
     assert!(
@@ -840,7 +840,7 @@ fn test_update_directory_recursive_with_persistence() {
     // to see that our changes are properly detected
     let initial_root_fs_node: FsNode = initial_root_node.into();
     let updated_root_fs_node: FsNode = updated_root.into();
-    let (_fs_nodes, directories) = fs.diff(&initial_root_fs_node, &updated_root_fs_node);
+    let (_fs_nodes, directories) = fs.persistence.diff(&initial_root_fs_node, &updated_root_fs_node);
 
     // We should have at least one directory change (the root directory)
     assert!(!directories.is_empty(), "Should have directory changes");
