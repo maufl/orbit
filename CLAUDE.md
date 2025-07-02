@@ -1,4 +1,5 @@
 # Claude Code Session Knowledge
+**Important:** Any time you make changes to the code and you are done making additional changes, run `cargo check` to see whether there are any errors. If no errors are reported run the tests to see whether they still succeed!
 
 ## Project Overview
 - **PFS**: A distributed content-addressed filesystem implemented in Rust using FUSE
