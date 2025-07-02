@@ -1,5 +1,4 @@
 use fjall::{Config, Keyspace, PartitionHandle};
-use log::debug;
 
 use crate::{ContentHash, Directory, FsNode, FsNodeHash};
 
@@ -67,7 +66,6 @@ impl Persistence for PfsPersistence {
         let mut value = Vec::new();
         ciborium::into_writer(fs_node, &mut value)?;
         self.fs_nodes_partition.insert(&key, &value)?;
-        debug!("Persisted FsNode with hash {}", node_hash);
         Ok(())
     }
 
@@ -77,7 +75,6 @@ impl Persistence for PfsPersistence {
         let mut value = Vec::new();
         ciborium::into_writer(directory, &mut value)?;
         self.directories_partition.insert(&key, &value)?;
-        debug!("Persisted Directory with content hash {}", content_hash);
         Ok(())
     }
 
@@ -86,7 +83,6 @@ impl Persistence for PfsPersistence {
         let mut value = Vec::new();
         ciborium::into_writer(root_hash, &mut value)?;
         self.fs_nodes_partition.insert(key, &value)?;
-        debug!("Persisted root hash {}", root_hash);
         Ok(())
     }
 

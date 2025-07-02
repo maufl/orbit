@@ -376,6 +376,58 @@ fn rename_file_to_different_directory() {
 }
 
 #[test]
+fn rename_file_to_existing_file() {
+    let (guard, mount_point, _fs) = setup();
+    thread::sleep(Duration::from_millis(100));
+
+    // Create first file
+    let file1_path = format!("{}/file1.txt", mount_point);
+    let file1_content = "This is file 1";
+    {
+        let mut file = fs::File::create_new(&file1_path).expect("To create file1");
+        file.write_all(file1_content.as_bytes())
+            .expect("To write to file1");
+        file.flush().expect("To flush file1");
+    }
+    thread::sleep(Duration::from_millis(50));
+
+    // Create second file
+    let file2_path = format!("{}/file2.txt", mount_point);
+    let file2_content = "This is file 2";
+    {
+        let mut file = fs::File::create_new(&file2_path).expect("To create file2");
+        file.write_all(file2_content.as_bytes())
+            .expect("To write to file2");
+        file.flush().expect("To flush file2");
+    }
+    thread::sleep(Duration::from_millis(50));
+
+    // Verify both files exist with correct content
+    assert!(fs::metadata(&file1_path).unwrap().is_file());
+    assert!(fs::metadata(&file2_path).unwrap().is_file());
+    let content1 = fs::read_to_string(&file1_path).expect("To read file1");
+    let content2 = fs::read_to_string(&file2_path).expect("To read file2");
+    assert_eq!(content1, file1_content);
+    assert_eq!(content2, file2_content);
+
+    // Try to rename file1 to file2 (this should succeed and overwrite file2)
+    let rename_result = fs::rename(&file1_path, &file2_path);
+    
+    // This should succeed - the filesystem now allows overwriting
+    assert!(rename_result.is_ok(), "Rename should succeed and overwrite target file");
+    
+    // Verify file1 no longer exists
+    assert!(fs::metadata(&file1_path).is_err(), "Original file should no longer exist after rename");
+    
+    // Verify file2 now exists and has file1's content
+    assert!(fs::metadata(&file2_path).unwrap().is_file(), "Target file should still exist");
+    let content2_after = fs::read_to_string(&file2_path).expect("To read file2 after rename");
+    assert_eq!(content2_after, file1_content, "File2 should now have file1's content");
+
+    drop(guard);
+}
+
+#[test]
 fn test_persistence_infrastructure() {
     let uuid = uuid::Uuid::new_v4();
     let mount_point = format!("/tmp/{}/pfs", uuid);

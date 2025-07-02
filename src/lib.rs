@@ -983,6 +983,7 @@ impl Pfs {
         name: &str,
         newparent: u64,
         newname: &str,
+        no_replace: bool,
     ) -> Result<(), libc::c_int> {
         if parent == newparent && name == newname {
             return Ok(());
@@ -995,10 +996,11 @@ impl Pfs {
             .ok_or(libc::ENOENT)?
             .clone();
         let (_dest_fs_node, dest_directory) = self.get_directory(newparent)?;
-        if dest_directory
-            .entries
-            .iter()
-            .any(|entry| entry.name == newname)
+        if no_replace
+            && dest_directory
+                .entries
+                .iter()
+                .any(|entry| entry.name == newname)
         {
             return Err(libc::EEXIST);
         }
@@ -1274,7 +1276,7 @@ impl Filesystem for Pfs {
         name: &std::ffi::OsStr,
         newparent: u64,
         newname: &std::ffi::OsStr,
-        _flags: u32,
+        flags: u32,
         reply: fuser::ReplyEmpty,
     ) {
         let old_name = match name.to_str() {
@@ -1287,7 +1289,9 @@ impl Filesystem for Pfs {
             None => return reply.error(libc::EINVAL),
         };
 
-        match self.pfs_rename(parent, old_name, newparent, new_name) {
+        let no_replace = flags & libc::RENAME_NOREPLACE > 0;
+
+        match self.pfs_rename(parent, old_name, newparent, new_name, no_replace) {
             Ok(()) => reply.ok(),
             Err(error) => {
                 warn!(
