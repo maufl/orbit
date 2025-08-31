@@ -25,6 +25,9 @@ pub mod config;
 pub mod network;
 pub mod persistence;
 
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
+
 #[derive(Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
 pub struct ContentHash(pub [u8; 32]);
 
@@ -356,7 +359,6 @@ impl Pfs {
     pub fn get_root_node(&self) -> RuntimeFsNode {
         self.runtime_data.read().inodes[1]
     }
-
 
     pub fn update_directory_recursive(
         &mut self,

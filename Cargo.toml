@@ -24,6 +24,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 tokio = { version = "1.45.1", features = ["sync"] }
 toml = "0.8"
 clap = { version = "4.0", features = ["derive"] }
+uuid = { version = "1.17.0", features = ["v4"], optional = true }
 
 [[bin]]
 name = "pfsd"
@@ -33,5 +34,5 @@ path = "src/bin/pfsd.rs"
 name = "listener"
 path = "src/bin/listener.rs"
 
-[dev-dependencies]
-uuid = { version = "1.17.0", features = ["v4"] }
+[features]
+test-utils = ["uuid"]
