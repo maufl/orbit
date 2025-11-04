@@ -1,11 +1,9 @@
-use chrono::Utc;
-use fuser::BackgroundSession;
-use pfs::{ContentHash, Directory, DirectoryEntry, FileType, FsNode, FsNodeHash, Pfs};
+use pfs::test_utils::*;
+use pfs::Pfs;
 use std::fs;
 use std::io::Write;
 use std::thread;
 use std::time::Duration;
-use pfs::test_utils::*;
 
 #[test]
 fn create_hello_world_file() {

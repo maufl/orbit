@@ -3,8 +3,6 @@ use chrono::Utc;
 use fuser::BackgroundSession;
 use std::fs;
 use std::io::Write;
-use std::thread;
-use std::time::Duration;
 
 pub fn setup_pfs() -> Pfs {
     let uuid = uuid::Uuid::new_v4();

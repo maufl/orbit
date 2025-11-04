@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::time::Duration;
 
-use crate::{ContentHash, Directory, FsNode, FsNodeHash, InodeNumber, Pfs};
+use crate::{Block, BlockHash, ContentHash, Directory, FsNode, InodeNumber, Pfs};
 use base64::Engine;
 use bytes::{BufMut, Bytes, BytesMut};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
@@ -17,8 +17,10 @@ pub const APLN: &str = "de.maufl.pfs";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Messages {
-    Hello([u8; 32]),
-    RootHashChanged([u8; 32]),
+    Hello(Block),
+    BlockChanged(Block),
+    BlockRequest(BlockHash),
+    BlockResponse(Block),
     NewFsNodes(Vec<FsNode>),
     NewDirectories(Vec<Directory>),
     ContentRequest(Vec<ContentHash>),
@@ -213,7 +215,8 @@ pub async fn handle_connection(
     message_sender: Sender<Messages>,
 ) -> Result<(), anyhow::Error> {
     let receiver = message_sender.subscribe();
-    if let Err(e) = message_sender.send(Messages::Hello(pfs.get_root_node().calculate_hash().0)) {
+    let current_block = pfs.runtime_data.read().current_block.clone();
+    if let Err(e) = message_sender.send(Messages::Hello(current_block)) {
         warn!("Unable to queue hello message for new connection: {}", e);
     };
     tokio::spawn(async move {
@@ -260,8 +263,15 @@ pub fn process_received_message(
                 }
             }
         }
-        Messages::RootHashChanged(new_root_hash) => {
-            let new_root_hash = FsNodeHash(new_root_hash);
+        Messages::BlockChanged(new_block) => {
+            debug!("Received a BlockChanged message");
+            // First persist the new block
+            if let Err(e) = pfs.persistence.persist_block(&new_block) {
+                warn!("Unable to persist new block: {}", e);
+                return;
+            }
+
+            let new_root_hash = new_block.root_node_hash;
             let old_root_hash = pfs.get_root_node().calculate_hash();
             if let Err(e) =
                 pfs.update_directory_recursive(&old_root_hash, &new_root_hash, InodeNumber(1))
@@ -271,20 +281,43 @@ pub fn process_received_message(
                 info!("New root hash is {}", pfs.get_root_node().calculate_hash());
             }
         }
-        Messages::Hello(root_hash) => {
-            let root_hash = FsNodeHash(root_hash);
+        Messages::Hello(block) => {
+            let block_hash = block.calculate_hash();
             debug!(
-                "Received Hello message from peer, their root hash is {}",
-                root_hash
+                "Received Hello message from peer, their block hash is {}",
+                block_hash
             );
-            if let Err(err) = pfs.persistence.load_fs_node(&root_hash) {
+            // Persist the block if we don't have it
+            if let Err(_) = pfs.persistence.load_block(&block_hash) {
                 info!(
-                    "The remotes root node {} is unknown to us: {}",
-                    root_hash, err
+                    "The remote's block {} is unknown to us, persisting it",
+                    block_hash
                 );
+                if let Err(e) = pfs.persistence.persist_block(&block) {
+                    warn!("Unable to persist block from hello: {}", e);
+                }
             } else {
-                debug!("We know this remote root node!");
-            };
+                debug!("We know this remote block!");
+            }
+        }
+        Messages::BlockRequest(block_hash) => {
+            debug!("Received BlockRequest for {}", block_hash);
+            match pfs.persistence.load_block(&block_hash) {
+                Ok(block) => {
+                    if let Err(e) = message_sender.send(Messages::BlockResponse(block)) {
+                        warn!("Failed to send block response: {}", e);
+                    }
+                }
+                Err(e) => {
+                    warn!("Unable to load requested block {}: {}", block_hash, e);
+                }
+            }
+        }
+        Messages::BlockResponse(block) => {
+            debug!("Received BlockResponse");
+            if let Err(e) = pfs.persistence.persist_block(&block) {
+                warn!("Unable to persist block from response: {}", e);
+            }
         }
         Messages::ContentRequest(requested_content) => {
             for content_hash in requested_content.into_iter() {

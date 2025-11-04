@@ -61,6 +61,40 @@ impl std::fmt::Debug for FsNodeHash {
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
 pub struct InodeNumber(pub u64);
 
+#[derive(Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
+pub struct BlockHash(pub [u8; 32]);
+
+impl Display for BlockHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "b-{}", hex::encode(self.0))
+    }
+}
+
+impl std::fmt::Debug for BlockHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy)]
+pub struct Block {
+    root_node_hash: FsNodeHash,
+    previous_blocks: (BlockHash, Option<BlockHash>),
+}
+
+impl Block {
+    pub fn calculate_hash(&self) -> BlockHash {
+        BlockHash(calculate_hash(&self))
+    }
+
+    pub fn new(root_node_hash: FsNodeHash, previous_block_hash: BlockHash) -> Self {
+        Block {
+            root_node_hash,
+            previous_blocks: (previous_block_hash, None),
+        }
+    }
+}
+
 fn calculate_hash<T: Serialize>(v: &T) -> [u8; 32] {
     let mut buffer = Vec::new();
     ciborium::into_writer(v, &mut buffer).expect("To be able to serialize");
@@ -292,6 +326,7 @@ struct PfsRuntimeData {
     directories: BTreeMap<ContentHash, RuntimeDirectory>,
     inodes: Vec<RuntimeFsNode>,
     open_files: Vec<Option<OpenFile>>,
+    current_block: Block,
 }
 
 #[derive(Clone)]
@@ -315,6 +350,7 @@ impl Pfs {
                 directories: BTreeMap::new(),
                 inodes: vec![RuntimeFsNode::default(); 1],
                 open_files: Vec::new(),
+                current_block: Block::default(),
             })),
             persistence,
             network_communication,
@@ -345,12 +381,14 @@ impl Pfs {
                 .directories
                 .insert(initial_root_node.content_hash, initial_directory);
             pfs.assign_inode_number(initial_root_node.clone());
-            if let Err(e) = pfs
-                .persistence
-                .persist_root_hash(&initial_root_node.calculate_hash())
-            {
-                error!("Failed to persist root hash: {}", e);
+
+            // Create and persist the initial block
+            let initial_block =
+                Block::new(initial_root_node.calculate_hash(), BlockHash::default());
+            if let Err(e) = pfs.persistence.persist_block(&initial_block) {
+                error!("Failed to persist initial block: {}", e);
             }
+            pfs.runtime_data.write().current_block = initial_block;
         }
 
         Ok(pfs)
@@ -439,21 +477,34 @@ impl Pfs {
         };
         self.runtime_data.write().inodes[inode_number.0 as usize] = new_dir_node;
         if inode_number.0 == 1 {
-            self.persistence
-                .persist_root_hash(&new_dir_node.calculate_hash())?;
+            // This is the root - create and persist a new block
+            let old_block = self.runtime_data.read().current_block.clone();
+            let new_block = Block::new(new_dir_node.calculate_hash(), old_block.calculate_hash());
+            self.persistence.persist_block(&new_block)?;
+            self.runtime_data.write().current_block = new_block;
         }
 
         Ok(())
     }
 
     fn restore_filesystem_tree(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Load the root hash first
-        let root_hash = self.persistence.load_root_hash()?;
-        info!("Found root hash {} in persistent storage", root_hash);
+        // Load the current block first
+        let current_block = self.persistence.load_current_block()?;
+        info!(
+            "Found current block {} in persistent storage",
+            current_block.calculate_hash()
+        );
+
+        // Extract the root hash from the block
+        let root_hash = current_block.root_node_hash;
+        info!("Root hash from block is {}", root_hash);
 
         // Restore the filesystem tree recursively, starting from the root
         let root_inode = self.restore_node_recursive(&root_hash, None)?;
         info!("Restored root node to inode {}", root_inode.0);
+
+        // Update the runtime data with the current block
+        self.runtime_data.write().current_block = current_block;
 
         info!(
             "Successfully restored filesystem tree from persistent storage with {} inodes",
@@ -613,13 +664,16 @@ impl Pfs {
             )?;
         } else {
             let old_root_hash = old_directory_node.calculate_hash();
-            // This is the root directory - persist the root hash
-            if let Err(e) = self
-                .persistence
-                .persist_root_hash(&new_directory_node.calculate_hash())
-            {
-                error!("Failed to persist root hash: {}", e);
+            // This is the root directory - create and persist a new block
+            let old_block = self.runtime_data.read().current_block.clone();
+            let new_block = Block::new(
+                new_directory_node.calculate_hash(),
+                old_block.calculate_hash(),
+            );
+            if let Err(e) = self.persistence.persist_block(&new_block) {
+                error!("Failed to persist block: {}", e);
             }
+            self.runtime_data.write().current_block = new_block;
             self.sent_messages_for_changed_root(old_root_hash);
         };
         Ok(())
@@ -656,7 +710,10 @@ impl Pfs {
         let (updated_fs_nodes, updated_directories) = self.persistence.diff(&old_node, &new_node);
         network_comm.send_message(Messages::NewFsNodes(updated_fs_nodes));
         network_comm.send_message(Messages::NewDirectories(updated_directories));
-        network_comm.send_message(Messages::RootHashChanged(new_hash.0));
+
+        // Send the new block
+        let current_block = self.runtime_data.read().current_block.clone();
+        network_comm.send_message(Messages::BlockChanged(current_block));
     }
 
     // Business logic methods without FUSE-specific handling

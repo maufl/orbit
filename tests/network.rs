@@ -1,9 +1,6 @@
-use chrono::Utc;
-use fuser::BackgroundSession;
 use pfs::test_utils::*;
-use pfs::{ContentHash, Directory, DirectoryEntry, FileType, FsNode, FsNodeHash, InodeNumber, Pfs};
+use pfs::{FileType, FsNode, InodeNumber};
 use std::fs;
-use std::io::Write;
 use std::thread;
 use std::time::Duration;
 
