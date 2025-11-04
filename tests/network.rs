@@ -329,7 +329,7 @@ fn test_update_directory_recursive_with_persistence() {
     // Test filesystem operations on the updated root directory
 
     // 1. Use pfs_readdir to list contents of root folder (inode 1)
-    let dir_entries = fs.pfs_readdir(1, 0).expect("To read root directory");
+    let dir_entries = pfs::fuse::readdir(&fs, 1, 0).expect("To read root directory");
 
     // Should have entries: ".", "..", and "test_file.txt"
     assert_eq!(
@@ -352,8 +352,7 @@ fn test_update_directory_recursive_with_persistence() {
     let file_inode = file_entry.ino;
 
     // 2. Use pfs_lookup to find the file by name
-    let lookup_attrs = fs
-        .pfs_lookup(1, "test_file.txt")
+    let lookup_attrs = pfs::fuse::lookup(&fs, 1, "test_file.txt")
         .expect("To lookup test_file.txt");
     assert_eq!(
         lookup_attrs.ino, file_inode,
@@ -370,7 +369,7 @@ fn test_update_directory_recursive_with_persistence() {
     );
 
     // 3. Use pfs_getattr to get file attributes by inode
-    let file_attrs = fs.pfs_getattr(file_inode).expect("To get file attributes");
+    let file_attrs = pfs::fuse::getattr(&fs, file_inode).expect("To get file attributes");
     assert_eq!(
         file_attrs.ino, file_inode,
         "Getattr should return correct inode"
@@ -452,15 +451,14 @@ fn test_update_directory_recursive_preserves_parent_references() {
         .expect("To update directory recursive");
 
     // Now verify that the file can be properly accessed
-    let dir_entries = fs.pfs_readdir(1, 0).expect("To read root directory");
+    let dir_entries = pfs::fuse::readdir(&fs, 1, 0).expect("To read root directory");
     let file_entry = dir_entries
         .iter()
         .find(|entry| entry.name == "file1.txt")
         .expect("Should find file1.txt in directory listing");
 
     // The key test: lookup should work (this would fail if parent_inode_number was None)
-    let lookup_attrs = fs
-        .pfs_lookup(1, "file1.txt")
+    let lookup_attrs = pfs::fuse::lookup(&fs, 1, "file1.txt")
         .expect("To lookup file1.txt - this tests parent reference");
     assert_eq!(lookup_attrs.size, 75, "Should show updated file size");
     assert_eq!(
@@ -469,8 +467,7 @@ fn test_update_directory_recursive_preserves_parent_references() {
     );
 
     // Verify getattr also works
-    let file_attrs = fs
-        .pfs_getattr(file_entry.ino)
+    let file_attrs = pfs::fuse::getattr(&fs, file_entry.ino)
         .expect("To get file attributes");
     assert_eq!(file_attrs.size, 75, "Getattr should show updated file size");
 }
@@ -513,7 +510,7 @@ fn test_network_sync_scenario() {
     // Now test that ls-like operations work:
 
     // 1. readdir should show the file
-    let entries = fs.pfs_readdir(1, 0).expect("To read directory");
+    let entries = pfs::fuse::readdir(&fs, 1, 0).expect("To read directory");
     let file_entry = entries
         .iter()
         .find(|e| e.name == "synced_file.txt")
@@ -522,7 +519,7 @@ fn test_network_sync_scenario() {
     println!("File entry inode: {}", file_entry.ino);
 
     // 2. lookup should work (this is what ls does for each file)
-    let lookup_result = fs.pfs_lookup(1, "synced_file.txt");
+    let lookup_result = pfs::fuse::lookup(&fs, 1, "synced_file.txt");
     match lookup_result {
         Ok(attrs) => {
             println!("Lookup succeeded: inode={}, size={}", attrs.ino, attrs.size);
@@ -537,7 +534,7 @@ fn test_network_sync_scenario() {
     }
 
     // 3. getattr should work on the inode
-    let getattr_result = fs.pfs_getattr(file_entry.ino);
+    let getattr_result = pfs::fuse::getattr(&fs, file_entry.ino);
     match getattr_result {
         Ok(attrs) => {
             println!(
@@ -589,7 +586,7 @@ fn test_network_sync_existing_file_update() {
     .expect("To set up initial state with file");
 
     // Verify the file works initially
-    let entries = fs.pfs_readdir(1, 0).expect("To read directory initially");
+    let entries = pfs::fuse::readdir(&fs, 1, 0).expect("To read directory initially");
     let file_entry_v1 = entries
         .iter()
         .find(|e| e.name == "shared_file.txt")
@@ -597,9 +594,9 @@ fn test_network_sync_existing_file_update() {
 
     println!("Initial file inode: {}", file_entry_v1.ino);
 
-    fs.pfs_lookup(1, "shared_file.txt")
+    pfs::fuse::lookup(&fs, 1, "shared_file.txt")
         .expect("Initial lookup should work");
-    fs.pfs_getattr(file_entry_v1.ino)
+    pfs::fuse::getattr(&fs, file_entry_v1.ino)
         .expect("Initial getattr should work");
 
     // Now simulate network sync updating this same file (same name, different content)
@@ -625,8 +622,7 @@ fn test_network_sync_existing_file_update() {
         .expect("To update to v2 via network sync");
 
     // Now test if the updated file is accessible (this is where the bug manifests)
-    let entries_v2 = fs
-        .pfs_readdir(1, 0)
+    let entries_v2 = pfs::fuse::readdir(&fs, 1, 0)
         .expect("To read directory after update");
     let file_entry_v2 = entries_v2
         .iter()
@@ -641,7 +637,7 @@ fn test_network_sync_existing_file_update() {
     }
 
     // The critical test: can we look up the updated file?
-    let lookup_result = fs.pfs_lookup(1, "shared_file.txt");
+    let lookup_result = pfs::fuse::lookup(&fs, 1, "shared_file.txt");
     match lookup_result {
         Ok(attrs) => {
             println!(
@@ -651,7 +647,7 @@ fn test_network_sync_existing_file_update() {
             assert_eq!(attrs.size, 750, "Should show updated size");
 
             // Also test getattr
-            let getattr_result = fs.pfs_getattr(attrs.ino);
+            let getattr_result = pfs::fuse::getattr(&fs, attrs.ino);
             match getattr_result {
                 Ok(getattr_attrs) => {
                     println!(
