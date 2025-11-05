@@ -5,7 +5,8 @@ use crate::{Block, BlockHash, ContentHash, Directory, FsNode, InodeNumber, Pfs};
 use base64::Engine;
 use bytes::{BufMut, Bytes, BytesMut};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
-use iroh::{Endpoint, NodeAddr, PublicKey};
+use iroh::{Endpoint, NodeAddr, PublicKey, SecretKey};
+use iroh::discovery::mdns::MdnsDiscovery;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -41,28 +42,78 @@ pub trait NetworkCommunication: Send + Sync {
 }
 
 /// Implementation of network communication using tokio broadcast channels
-pub struct TokioNetworkCommunication {
+pub struct IrohNetworkCommunication {
     message_sender: Sender<Messages>,
+    endpoint: Endpoint,
     #[allow(dead_code)] // Reserved for future use
     tokio_runtime_handle: Handle,
-    content_notifier: Receiver<ContentHash>,
+    content_notification_sender: Sender<ContentHash>,
 }
 
-impl TokioNetworkCommunication {
-    pub fn new(
-        message_sender: Sender<Messages>,
-        tokio_runtime_handle: Handle,
-        content_notifier: Receiver<ContentHash>,
-    ) -> Self {
-        Self {
-            message_sender,
-            tokio_runtime_handle,
-            content_notifier,
+impl IrohNetworkCommunication {
+
+    pub async fn build(secret_key: SecretKey) -> anyhow::Result<IrohNetworkCommunication> {
+        let endpoint = Endpoint::builder()
+            .discovery(Box::new(MdnsDiscovery::new(secret_key.public())?))
+            .secret_key(secret_key)
+            .alpns(vec![APLN.as_bytes().to_vec()])
+            .bind()
+            .await?;
+        info!("Node ID is {}", endpoint.node_id());
+        let (content_notification_sender, _content_notification_receiver) =
+            tokio::sync::broadcast::channel(10);
+        let (sender, _receiver) = tokio::sync::broadcast::channel(10);
+        Ok(IrohNetworkCommunication {
+            message_sender: sender.clone(),
+            endpoint,
+            tokio_runtime_handle: tokio::runtime::Handle::current(),
+            content_notification_sender,
+        })
+    }
+
+
+    pub async fn connect_to_all_peers(
+        &self,
+        peer_node_ids: Vec<String>,
+        pfs: Pfs,
+    ) {
+        if peer_node_ids.is_empty() {
+            info!("No peer nodes configured, running in standalone mode");
+            return;
         }
+
+        info!("Connecting to {} peer(s)", peer_node_ids.len());
+
+        for peer_node_id in peer_node_ids {
+            if let Err(e) = connect_to_peer(
+                peer_node_id.clone(),
+                self.endpoint.clone(),
+                pfs.clone(),
+                self.message_sender.clone(),
+                self.content_notification_sender.clone(),
+            )
+                .await
+            {
+                warn!("Error connecting to peer {}: {}", peer_node_id, e)
+            }
+        }
+    }
+
+    pub fn accept_connections(&self, pfs: Pfs) {
+        let endpoint = self.endpoint.clone();
+        let message_sender = self.message_sender.clone();
+        let content_notification_sender = self.content_notification_sender.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                accept_connections(endpoint, pfs, message_sender, content_notification_sender).await
+            {
+                warn!("Error accepting connections: {}", e);
+            }
+        });
     }
 }
 
-impl NetworkCommunication for TokioNetworkCommunication {
+impl NetworkCommunication for IrohNetworkCommunication {
     fn send_message(&self, message: Messages) {
         if let Err(e) = self.message_sender.send(message) {
             warn!("Failed to send network message: {}", e);
@@ -76,7 +127,7 @@ impl NetworkCommunication for TokioNetworkCommunication {
         callback: Box<dyn FnOnce() + Send>,
     ) {
         self.send_message(Messages::ContentRequest(vec![content_hash.clone()]));
-        let mut content_notifier = self.content_notifier.resubscribe();
+        let mut content_notifier = self.content_notification_sender.subscribe();
         self.tokio_runtime_handle.spawn(async move {
             let timeout = tokio::time::sleep(timeout);
             tokio::pin!(timeout);
@@ -129,34 +180,6 @@ pub async fn connect_to_peer(
     Ok(())
 }
 
-pub async fn connect_to_all_peers(
-    peer_node_ids: Vec<String>,
-    endpoint: &Endpoint,
-    pfs: Pfs,
-    sender: tokio::sync::broadcast::Sender<Messages>,
-    content_notification_sender: tokio::sync::broadcast::Sender<ContentHash>,
-) {
-    if peer_node_ids.is_empty() {
-        info!("No peer nodes configured, running in standalone mode");
-        return;
-    }
-
-    info!("Connecting to {} peer(s)", peer_node_ids.len());
-
-    for peer_node_id in peer_node_ids {
-        if let Err(e) = connect_to_peer(
-            peer_node_id.clone(),
-            endpoint.clone(),
-            pfs.clone(),
-            sender.clone(),
-            content_notification_sender.clone(),
-        )
-        .await
-        {
-            warn!("Error connecting to peer {}: {}", peer_node_id, e)
-        }
-    }
-}
 
 pub async fn accept_connections(
     endpoint: Endpoint,

@@ -1,15 +1,14 @@
 use clap::Parser;
-use iroh::{Endpoint, discovery::mdns::MdnsDiscovery};
 use pfs::Pfs;
 use pfs::config::Config;
 use pfs::network::{
-    APLN, NetworkCommunication, TokioNetworkCommunication, accept_connections, connect_to_all_peers,
+    NetworkCommunication, IrohNetworkCommunication,
 };
 use std::sync::Arc;
 use std::{path::PathBuf, thread};
 use tokio::sync::broadcast::Receiver;
 
-use log::{LevelFilter, debug, error, info, warn};
+use log::{LevelFilter, debug, error, info};
 
 #[derive(Parser)]
 #[command(name = "pfsd")]
@@ -59,23 +58,9 @@ async fn main() -> Result<(), anyhow::Error> {
         "Node public key: {}",
         hex::encode(secret_key.public().as_bytes())
     );
-    let endpoint = Endpoint::builder()
-        .discovery(Box::new(MdnsDiscovery::new(secret_key.public())?))
-        .secret_key(secret_key)
-        .alpns(vec![APLN.as_bytes().to_vec()])
-        .bind()
-        .await?;
-    info!("Node ID is {}", endpoint.node_id());
     let (shutdown_sender, shutdown_receiver) = tokio::sync::broadcast::channel(1);
-    let (content_notification_sender, content_notification_receiver) =
-        tokio::sync::broadcast::channel(10);
-    let (sender, _receiver) = tokio::sync::broadcast::channel(10);
-    let network_communication = std::sync::Arc::new(TokioNetworkCommunication::new(
-        sender.clone(),
-        tokio::runtime::Handle::current(),
-        content_notification_receiver,
-    )) as std::sync::Arc<dyn pfs::network::NetworkCommunication>;
-    let pfs = initialize_pfs(&config, network_communication);
+    let iroh_network_communication = Arc::new(IrohNetworkCommunication::build(secret_key).await?);
+    let pfs = initialize_pfs(&config, iroh_network_communication.clone());
     info!(
         "Current root hash is {}",
         pfs.get_root_node().calculate_hash()
@@ -85,30 +70,11 @@ async fn main() -> Result<(), anyhow::Error> {
         let mount_point = config.mount_point.clone();
         thread::spawn(move || run_fs(pfs, mount_point, shutdown_receiver));
     }
-    {
-        let pfs = pfs.clone();
-        let endpoint = endpoint.clone();
-        let sender = sender.clone();
-        let content_notification_sender = content_notification_sender.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                accept_connections(endpoint, pfs, sender, content_notification_sender).await
-            {
-                warn!("Error accepting connections: {}", e);
-            }
-        });
-    }
+
 
     // Connect to all peer node IDs from config
     let peer_node_ids = config.peer_node_ids.clone();
-    connect_to_all_peers(
-        peer_node_ids,
-        &endpoint,
-        pfs,
-        sender,
-        content_notification_sender,
-    )
-    .await;
+    iroh_network_communication.connect_to_all_peers(peer_node_ids, pfs).await;
     // Keep the main task running indefinitely in standalone mode
     tokio::signal::ctrl_c().await?;
     let _ = shutdown_sender.send(());
