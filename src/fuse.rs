@@ -1,17 +1,42 @@
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use fuser::{FileAttr, Filesystem};
 use log::warn;
 
-use crate::{InodeNumber, Pfs, RuntimeDirectoryEntryInfo};
+use crate::{InodeNumber, Pfs, RuntimeDirectoryEntryInfo, RuntimeFsNode};
+
+pub fn as_file_attr(fs_node: &RuntimeFsNode, inode_number: InodeNumber) -> FileAttr {
+    let is_directory = fs_node.is_directory();
+    FileAttr {
+        ino: inode_number.0 as u64,
+        size: fs_node.size,
+        blocks: 0,
+        atime: SystemTime::now(),
+        mtime: SystemTime::from(fs_node.modification_time),
+        ctime: SystemTime::now(),
+        crtime: SystemTime::now(),
+        kind: if !is_directory {
+            fuser::FileType::RegularFile
+        } else {
+            fuser::FileType::Directory
+        },
+        perm: 0o755,
+        nlink: if !is_directory { 1 } else { 2 },
+        uid: nix::unistd::getuid().as_raw(),
+        gid: nix::unistd::getgid().as_raw(),
+        rdev: 0,
+        flags: 0,
+        blksize: 0,
+    }
+}
 
 pub fn getattr(pfs: &Pfs, ino: u64) -> Result<FileAttr, libc::c_int> {
     let runtime_data = pfs.runtime_data.read();
     let Some(fs_node) = runtime_data.inodes.get(ino as usize) else {
         return Err(libc::ENOENT);
     };
-    let attrs = fs_node.as_file_attr(InodeNumber(ino));
+    let attrs = as_file_attr(fs_node, InodeNumber(ino));
     Ok(attrs)
 }
 
@@ -76,7 +101,7 @@ pub fn mkdir(pfs: &mut Pfs, parent: u64, name: &str) -> Result<FileAttr, libc::c
             inode_number,
         },
     )?;
-    Ok(fs_node.as_file_attr(inode_number))
+    Ok(as_file_attr(&fs_node, inode_number))
 }
 
 pub fn create(
@@ -91,11 +116,8 @@ pub fn create(
     use std::fs::File;
 
     let temp_file_path = pfs.data_dir.clone() + "/" + &Utc::now().to_rfc3339();
-    let fs_node = pfs.new_file_node_with_persistence(
-        ContentHash::default(),
-        0,
-        Some(InodeNumber(parent)),
-    );
+    let fs_node =
+        pfs.new_file_node_with_persistence(ContentHash::default(), 0, Some(InodeNumber(parent)));
 
     let inode_number = pfs.assign_inode_number(fs_node);
     let open_file = crate::OpenFile {
@@ -114,7 +136,7 @@ pub fn create(
         },
     )?;
     let fh = (pfs.runtime_data.read().open_files.len() - 1) as u64;
-    Ok((fs_node.as_file_attr(inode_number), fh))
+    Ok((as_file_attr(&fs_node, inode_number), fh))
 }
 
 pub fn open(pfs: &mut Pfs, ino: u64, flags: i32) -> Result<u64, libc::c_int> {
@@ -146,7 +168,13 @@ pub fn open(pfs: &mut Pfs, ino: u64, flags: i32) -> Result<u64, libc::c_int> {
     Ok(fh)
 }
 
-pub fn write(pfs: &mut Pfs, _ino: u64, fh: u64, offset: i64, data: &[u8]) -> Result<u32, libc::c_int> {
+pub fn write(
+    pfs: &mut Pfs,
+    _ino: u64,
+    fh: u64,
+    offset: i64,
+    data: &[u8],
+) -> Result<u32, libc::c_int> {
     use std::os::unix::fs::FileExt;
 
     let mut runtime_data = pfs.runtime_data.write();
@@ -162,7 +190,13 @@ pub fn write(pfs: &mut Pfs, _ino: u64, fh: u64, offset: i64, data: &[u8]) -> Res
     Ok(data.len() as u32)
 }
 
-pub fn read(pfs: &mut Pfs, _ino: u64, fh: u64, offset: i64, size: u32) -> Result<Vec<u8>, libc::c_int> {
+pub fn read(
+    pfs: &mut Pfs,
+    _ino: u64,
+    fh: u64,
+    offset: i64,
+    size: u32,
+) -> Result<Vec<u8>, libc::c_int> {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut runtime_data = pfs.runtime_data.write();
@@ -191,8 +225,7 @@ pub fn release(pfs: &mut Pfs, ino: u64, fh: u64) -> Result<(), libc::c_int> {
 
     let mut open_file = {
         let mut runtime_data = pfs.runtime_data.write();
-        std::mem::replace(&mut runtime_data.open_files[fh as usize], None)
-            .ok_or(libc::ENOENT)?
+        std::mem::replace(&mut runtime_data.open_files[fh as usize], None).ok_or(libc::ENOENT)?
     };
     if !open_file.writable {
         return Ok(());
@@ -234,7 +267,7 @@ pub fn lookup(pfs: &Pfs, parent: u64, name: &str) -> Result<FileAttr, libc::c_in
     for entry in directory.entries.iter() {
         if entry.name == name {
             let fs_node = &runtime_data.inodes[entry.inode_number.0 as usize];
-            return Ok(fs_node.as_file_attr(entry.inode_number));
+            return Ok(as_file_attr(fs_node, entry.inode_number));
         }
     }
     Err(libc::ENOENT)

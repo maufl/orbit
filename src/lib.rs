@@ -1,12 +1,9 @@
-use std::{
-    collections::BTreeMap, fmt::Display, fs::File, path::PathBuf, sync::Arc, time::SystemTime,
-};
+use std::{collections::BTreeMap, fmt::Display, fs::File, path::PathBuf, sync::Arc};
 
 use network::{Messages, NetworkCommunication};
 use parking_lot::RwLock;
 
 use chrono::{DateTime, Utc};
-use fuser::FileAttr;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 
@@ -118,31 +115,6 @@ pub struct RuntimeFsNode {
 impl RuntimeFsNode {
     fn is_directory(&self) -> bool {
         matches!(self.kind, FileType::Directory)
-    }
-
-    fn as_file_attr(&self, inode_number: InodeNumber) -> FileAttr {
-        let is_directory = self.is_directory();
-        FileAttr {
-            ino: inode_number.0 as u64,
-            size: self.size,
-            blocks: 0,
-            atime: SystemTime::now(),
-            mtime: SystemTime::from(self.modification_time),
-            ctime: SystemTime::now(),
-            crtime: SystemTime::now(),
-            kind: if !is_directory {
-                fuser::FileType::RegularFile
-            } else {
-                fuser::FileType::Directory
-            },
-            perm: 0o755,
-            nlink: if !is_directory { 1 } else { 2 },
-            uid: nix::unistd::getuid().as_raw(),
-            gid: nix::unistd::getgid().as_raw(),
-            rdev: 0,
-            flags: 0,
-            blksize: 0,
-        }
     }
 
     fn new_directory_node(
