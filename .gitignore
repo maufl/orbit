@@ -2,3 +2,6 @@
 .claude
 .idea
 pfsd.toml
+pfs-uniffi/bindings/
+android/app/src/main/java/uniffi
+android/app/src/main/jniLibs/x86_64/libpfs_uniffi.so

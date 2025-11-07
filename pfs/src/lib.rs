@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::persistence::{Persistence, PfsPersistence};
 
 pub mod config;
+#[cfg(feature = "fuse")]
 pub mod fuse;
 pub mod network;
 pub mod persistence;
@@ -278,6 +279,7 @@ pub(crate) struct OpenFile {
     pub(crate) writable: bool,
 }
 
+#[cfg(feature = "fuse")]
 #[derive(Debug, Clone)]
 pub struct RuntimeDirectoryEntryInfo {
     pub ino: u64,
