@@ -1,7 +1,6 @@
 // UniFFI bindings for PFS - exposes a simplified API for Kotlin/Swift/Python
 // This is a separate library target that wraps the main PFS functionality
 
-use pfs::config::Config;
 use pfs::network::IrohNetworkCommunication;
 use pfs::Pfs;
 use std::sync::Arc;
@@ -34,38 +33,6 @@ impl PfsClient {
         std::fs::create_dir_all(&data_dir)?;
         std::fs::create_dir_all(format!("{}/tmp", data_dir))?;
 
-        // Create or load config
-        let config_path = format!("{}/.config.toml", data_dir);
-        let mut config = if std::path::Path::new(&config_path).exists() {
-            Config::load_from_file(&std::path::PathBuf::from(&config_path))
-                .map_err(|e| PfsError::InitializationError {
-                    error_message: format!("Failed to load config: {}", e),
-                })?
-        } else {
-            let mut config = Config::default();
-            config.data_dir = data_dir.clone();
-            config
-        };
-
-        // Add peer node IDs to config
-        for peer_id in peer_node_ids {
-            config.add_peer_node_id(peer_id);
-        }
-
-        // Get or generate secret key
-        let secret_key = config.get_secret_key().map_err(|e| {
-            PfsError::InitializationError {
-                error_message: format!("Failed to get secret key: {}", e),
-            }
-        })?;
-
-        // Save config with generated key
-        config
-            .save_to_file(&std::path::PathBuf::from(&config_path))
-            .map_err(|e| PfsError::InitializationError {
-                error_message: format!("Failed to save config: {}", e),
-            })?;
-
         // Build network communication using tokio runtime
         let runtime = tokio::runtime::Runtime::new().map_err(|e| {
             PfsError::InitializationError {
@@ -75,7 +42,7 @@ impl PfsClient {
 
         let network_communication = runtime
             .block_on(async {
-                IrohNetworkCommunication::build(secret_key)
+                IrohNetworkCommunication::build(pfs::config::new_secret_key())
                     .await
                     .map_err(|e| PfsError::InitializationError {
                         error_message: format!("Failed to build network communication: {}", e),
@@ -83,25 +50,12 @@ impl PfsClient {
             })?;
 
         let network_communication = Arc::new(network_communication);
-
+        
         // Initialize PFS
         let pfs = Pfs::initialize(data_dir.clone(), Some(network_communication.clone()))
             .map_err(|e| PfsError::InitializationError {
                 error_message: format!("Failed to initialize PFS: {}", e),
             })?;
-
-        // Connect to peers if any were provided
-        if !config.peer_node_ids.is_empty() {
-            let peer_node_ids = config.peer_node_ids.clone();
-            let pfs_clone = pfs.clone();
-            let network_communication_clone = network_communication.clone();
-
-            runtime.block_on(async move {
-                network_communication_clone
-                    .connect_to_all_peers(peer_node_ids, pfs_clone)
-                    .await;
-            });
-        }
 
         Ok(PfsClient { pfs, runtime })
     }

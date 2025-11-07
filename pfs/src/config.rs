@@ -18,6 +18,11 @@ pub struct Config {
     pub peer_node_ids: Vec<String>,
 }
 
+pub fn new_secret_key() -> SecretKey {
+    let mut rng = OsRng;
+    SecretKey::generate(&mut rng)
+}
+
 impl Default for Config {
     fn default() -> Self {
         let home = env::var("HOME").expect("HOME environment variable must be set");
@@ -68,9 +73,7 @@ impl Config {
 
         // Generate private key if not present
         if config.private_key.is_none() {
-            let mut rng = OsRng;
-            let secret_key = SecretKey::generate(&mut rng);
-            config.private_key = Some(hex::encode(secret_key.to_bytes()));
+            config.private_key = Some(hex::encode(new_secret_key().to_bytes()));
             debug!("Generated new private key");
         }
 
