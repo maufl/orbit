@@ -89,14 +89,7 @@ impl Config {
             .private_key
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Private key not set in config"))?;
-        let key_bytes = hex::decode(key_hex)?;
-        if key_bytes.len() != 32 {
-            return Err(anyhow::anyhow!("Private key must be 32 bytes"));
-        }
-        let mut key_array = [0u8; 32];
-        key_array.copy_from_slice(&key_bytes);
-        let secret_key = SecretKey::from_bytes(&key_array);
-        Ok(secret_key)
+        decode_secret_key(key_hex)
     }
 
     pub fn add_peer_node_id(&mut self, node_id: String) {
@@ -104,4 +97,19 @@ impl Config {
             self.peer_node_ids.push(node_id);
         }
     }
+}
+
+pub fn encode_secret_key(secret_key: &SecretKey) -> String {
+    hex::encode(secret_key.to_bytes())
+}
+
+pub fn decode_secret_key(key_hex: &String) -> Result<SecretKey, Error> {
+    let key_bytes = hex::decode(key_hex)?;
+    if key_bytes.len() != 32 {
+        return Err(anyhow::anyhow!("Private key must be 32 bytes"));
+    }
+    let mut key_array = [0u8; 32];
+    key_array.copy_from_slice(&key_bytes);
+    let secret_key = SecretKey::from_bytes(&key_array);
+    Ok(secret_key)
 }
