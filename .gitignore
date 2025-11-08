@@ -4,5 +4,5 @@
 pfsd.toml
 pfs-uniffi/bindings/
 android/app/src/main/java/uniffi
-android/app/src/main/jniLibs/x86_64/libpfs_uniffi.so
+android/app/src/main/jniLibs/x86_64
 android/app/src/main/jniLibs/arm64-v8a

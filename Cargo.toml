@@ -2,5 +2,5 @@
 resolver = "2"
 members = [
     "orbit",
-    "pfs-uniffi", "uniffi-bindgen",
+    "orbit-android", "uniffi-bindgen",
 ]

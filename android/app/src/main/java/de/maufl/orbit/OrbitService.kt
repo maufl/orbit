@@ -5,17 +5,17 @@ import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import android.util.Log
-import uniffi.pfs_uniffi.Config
-import uniffi.pfs_uniffi.PfsClient
+import uniffi.orbit_android.Config
+import uniffi.orbit_android.OrbitClient
 import androidx.core.content.edit
 
 class OrbitService : Service() {
 
-    lateinit var pfsClient: PfsClient
+    lateinit var orbitClient: OrbitClient
 
     companion object {
         private const val TAG = "OrbitService"
-        private const val PREFS_NAME = "pfs_prefs"
+        private const val PREFS_NAME = "orbit_prefs"
         private const val KEY_PRIVATE_KEY = "private_key"
     }
 
@@ -45,12 +45,12 @@ class OrbitService : Service() {
             peerNodeIds = listOf()
         )
 
-        // Initialize PFS client
-        pfsClient = PfsClient(config)
+        // Initialize Orbit client
+        orbitClient = OrbitClient(config)
 
         // If we didn't have a private key, save the newly generated one
         if (privateKey == null) {
-            val newConfig = pfsClient.getConfig()
+            val newConfig = orbitClient.getConfig()
             newConfig.privateKey?.let { newKey ->
                 prefs.edit { putString(KEY_PRIVATE_KEY, newKey) }
                 Log.i(TAG, "Saved new secret key to SharedPreferences")

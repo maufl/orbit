@@ -2552,6 +2552,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "orbit-android"
+version = "0.1.0"
+dependencies = [
+ "android_logger",
+ "anyhow",
+ "hex",
+ "log",
+ "orbit",
+ "thiserror 1.0.69",
+ "tokio",
+ "uniffi",
+]
+
+[[package]]
 name = "overload"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2688,20 +2702,6 @@ dependencies = [
  "once_cell",
  "pest",
  "sha2",
-]
-
-[[package]]
-name = "pfs-uniffi"
-version = "0.1.0"
-dependencies = [
- "android_logger",
- "anyhow",
- "hex",
- "log",
- "orbit",
- "thiserror 1.0.69",
- "tokio",
- "uniffi",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
-// UniFFI bindings for PFS - exposes a simplified API for Kotlin/Swift/Python
-// This is a separate library target that wraps the main PFS functionality
+// UniFFI bindings for Orbit - exposes a simplified API for Kotlin/Swift/Python
+// This is a separate library target that wraps the main Orbit functionality
 
 use log::info;
 use orbit::network::IrohNetworkCommunication;
@@ -18,19 +18,19 @@ pub struct Config {
     pub peer_node_ids: Vec<String>,
 }
 
-/// A simplified PFS client for use from foreign language bindings
+/// A simplified Orbit client for use from foreign language bindings
 #[derive(uniffi::Object)]
-pub struct PfsClient {
+pub struct OrbitClient {
     #[allow(dead_code)]
-    pfs: OrbitFs,
+    orbit_fs: OrbitFs,
     config: Config,
     #[allow(dead_code)]
     runtime: tokio::runtime::Runtime,
 }
 
 #[uniffi::export]
-impl PfsClient {
-    /// Create a new PFS client with the given data directory and optional peer node IDs
+impl OrbitClient {
+    /// Create a new Orbit client with the given data directory and optional peer node IDs
     ///
     /// This initializes the filesystem with network communication enabled.
     /// The data directory will be created if it doesn't exist.
@@ -40,18 +40,18 @@ impl PfsClient {
     /// * `data_dir` - Directory to store filesystem data
     /// * `peer_node_ids` - Optional list of peer node IDs to connect to (hex format)
     #[uniffi::constructor]
-    pub fn new(config: Config) -> Result<Self, PfsError> {
+    pub fn new(config: Config) -> Result<Self, OrbitError> {
         // Initialize Android logger
         #[cfg(target_os = "android")]
         {
             android_logger::init_once(
                 android_logger::Config::default()
                     .with_max_level(log::LevelFilter::Debug)
-                    .with_tag("PFS")
+                    .with_tag("Orbit")
                     .with_filter(
                         android_logger::FilterBuilder::new()
                             .filter_module("orbit", log::LevelFilter::Debug)
-                            .filter_module("pfs_uniffi", log::LevelFilter::Debug)
+                            .filter_module("orbit_android", log::LevelFilter::Debug)
                             .build(),
                     ),
             );
@@ -64,13 +64,13 @@ impl PfsClient {
 
         // Build network communication using tokio runtime
         let runtime =
-            tokio::runtime::Runtime::new().map_err(|e| PfsError::InitializationError {
+            tokio::runtime::Runtime::new().map_err(|e| OrbitError::InitializationError {
                 error_message: format!("Failed to create tokio runtime: {}", e),
             })?;
 
         let secret_key = if let Some(private_key) = &config.private_key {
             orbit::config::decode_secret_key(&private_key).map_err(|e| {
-                PfsError::InitializationError {
+                OrbitError::InitializationError {
                     error_message: format!("Failed to decode private key: {}", e),
                 }
             })?
@@ -91,21 +91,21 @@ impl PfsClient {
         let network_communication = runtime.block_on(async {
             IrohNetworkCommunication::build(secret_key)
                 .await
-                .map_err(|e| PfsError::InitializationError {
+                .map_err(|e| OrbitError::InitializationError {
                     error_message: format!("Failed to build network communication: {}", e),
                 })
         })?;
 
         let network_communication = Arc::new(network_communication);
 
-        // Initialize PFS
-        let pfs = OrbitFs::initialize(data_dir.clone(), Some(network_communication.clone()))
-            .map_err(|e| PfsError::InitializationError {
-                error_message: format!("Failed to initialize PFS: {}", e),
-            })?;
+        // Initialize Orbit
+        let orbit_fs = OrbitFs::initialize(data_dir.clone(), Some(network_communication.clone()))
+            .map_err(|e| OrbitError::InitializationError {
+            error_message: format!("Failed to initialize Orbit: {}", e),
+        })?;
 
-        Ok(PfsClient {
-            pfs,
+        Ok(OrbitClient {
+            orbit_fs,
             config: final_config,
             runtime,
         })
@@ -116,9 +116,9 @@ impl PfsClient {
     }
 }
 
-/// Errors that can occur in PFS operations
+/// Errors that can occur in Orbit operations
 #[derive(Debug, thiserror::Error, uniffi::Error)]
-pub enum PfsError {
+pub enum OrbitError {
     #[error("IO error: {error_message}")]
     IoError { error_message: String },
 
@@ -126,9 +126,9 @@ pub enum PfsError {
     InitializationError { error_message: String },
 }
 
-impl From<std::io::Error> for PfsError {
+impl From<std::io::Error> for OrbitError {
     fn from(err: std::io::Error) -> Self {
-        PfsError::IoError {
+        OrbitError::IoError {
             error_message: err.to_string(),
         }
     }
