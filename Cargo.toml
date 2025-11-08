@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "pfs",
+    "orbit",
     "pfs-uniffi", "uniffi-bindgen",
 ]

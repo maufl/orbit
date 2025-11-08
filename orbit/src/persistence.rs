@@ -15,7 +15,7 @@ pub trait Persistence: Send + Sync {
     -> (Vec<FsNode>, Vec<Directory>);
 }
 
-pub struct PfsPersistence {
+pub struct OrbitFsPersitence {
     /// This field may not be removed! It looks unused, but if you drop the Keyspace fjall will stop working
     keyspace: Keyspace,
     fs_nodes_partition: PartitionHandle,
@@ -23,7 +23,7 @@ pub struct PfsPersistence {
     blocks_partition: PartitionHandle,
 }
 
-impl PfsPersistence {
+impl OrbitFsPersitence {
     pub fn new(data_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let kv_path = format!("{}/metadata", data_dir);
         std::fs::create_dir_all(&kv_path)?;
@@ -33,7 +33,7 @@ impl PfsPersistence {
         let directories_partition = keyspace.open_partition("directories", Default::default())?;
         let blocks_partition = keyspace.open_partition("blocks", Default::default())?;
 
-        Ok(PfsPersistence {
+        Ok(OrbitFsPersitence {
             keyspace,
             fs_nodes_partition,
             directories_partition,
@@ -46,7 +46,7 @@ impl PfsPersistence {
     }
 }
 
-impl Persistence for PfsPersistence {
+impl Persistence for OrbitFsPersitence {
     fn load_fs_node(&self, node_hash: &FsNodeHash) -> Result<FsNode, anyhow::Error> {
         if let Some(value) = self.fs_nodes_partition.get(&node_hash.0)? {
             let fs_node: FsNode = ciborium::from_reader(&*value)?;
@@ -138,7 +138,7 @@ impl Persistence for PfsPersistence {
     }
 }
 
-impl PfsPersistence {
+impl OrbitFsPersitence {
     fn diff_recursive(
         &self,
         old_dir_node: &FsNode,

@@ -5,7 +5,7 @@
 - **PFS**: A distributed content-addressed filesystem implemented in Rust using FUSE
 - Files stored by SHA-256 hash with metadata persisted using fjall embedded database
 - Network communication using iroh for peer-to-peer connections
-- Main components: `src/lib.rs` (core), `src/config.rs` (configuration), `src/bin/pfsd.rs` (daemon), `tests/basics.rs` (integration tests)
+- Main components: `src/lib.rs` (core), `src/config.rs` (configuration), `src/bin/orbitd.rs` (daemon), `tests/basics.rs` (integration tests)
 
 ## Key Architecture Decisions
 - **Pfs struct**: Uses `PfsRuntimeData` wrapped in `Arc<parking_lot::RwLock<_>>` for thread-safe runtime state
@@ -31,7 +31,7 @@
 - **Configuration**: 
   - Default mount point: `$HOME/Orbit`
   - Default data directory: `$XDG_DATA_HOME/pfs_data` (falls back to `$HOME/.local/share/pfs_data`)
-  - Config file: `$XDG_CONFIG_HOME/pfsd.toml` (falls back to `$HOME/.config/pfsd.toml`)
+  - Config file: `$XDG_CONFIG_HOME/orbitd.toml` (falls back to `$HOME/.config/orbitd.toml`)
   - Automatic private key generation and persistence
 - **Persistence**: All FsNodes and Directory structures automatically persisted to fjall database
 - **Root Hash Storage**: Root FsNodeHash stored in KV store under special key `__ROOT_HASH__`

@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 use fuser::{FileAttr, Filesystem};
 use log::warn;
 
-use crate::{InodeNumber, Pfs, RuntimeDirectoryEntryInfo, RuntimeFsNode};
+use crate::{InodeNumber, OrbitFs, RuntimeDirectoryEntryInfo, RuntimeFsNode};
 
 pub fn as_file_attr(fs_node: &RuntimeFsNode, inode_number: InodeNumber) -> FileAttr {
     let is_directory = fs_node.is_directory();
@@ -31,8 +31,8 @@ pub fn as_file_attr(fs_node: &RuntimeFsNode, inode_number: InodeNumber) -> FileA
     }
 }
 
-pub fn getattr(pfs: &Pfs, ino: u64) -> Result<FileAttr, libc::c_int> {
-    let runtime_data = pfs.runtime_data.read();
+pub fn getattr(orbit_fs: &OrbitFs, ino: u64) -> Result<FileAttr, libc::c_int> {
+    let runtime_data = orbit_fs.runtime_data.read();
     let Some(fs_node) = runtime_data.inodes.get(ino as usize) else {
         return Err(libc::ENOENT);
     };
@@ -41,11 +41,11 @@ pub fn getattr(pfs: &Pfs, ino: u64) -> Result<FileAttr, libc::c_int> {
 }
 
 pub fn readdir(
-    pfs: &Pfs,
+    orbit_fs: &OrbitFs,
     ino: u64,
     offset: i64,
 ) -> Result<Vec<RuntimeDirectoryEntryInfo>, libc::c_int> {
-    let (fs_node, directory) = pfs.get_directory(ino)?;
+    let (fs_node, directory) = orbit_fs.get_directory(ino)?;
     let mut entries = Vec::new();
 
     if offset == 0 {
@@ -62,7 +62,7 @@ pub fn readdir(
             name: "..".to_string(),
         });
 
-        let runtime_data = pfs.runtime_data.read();
+        let runtime_data = orbit_fs.runtime_data.read();
         let inodes = &runtime_data.inodes;
         let mut entry_offset = 3;
         for entry in directory.entries.iter() {
@@ -83,17 +83,17 @@ pub fn readdir(
     Ok(entries)
 }
 
-pub fn mkdir(pfs: &mut Pfs, parent: u64, name: &str) -> Result<FileAttr, libc::c_int> {
-    match pfs.get_directory(parent) {
+pub fn mkdir(orbit_fs: &mut OrbitFs, parent: u64, name: &str) -> Result<FileAttr, libc::c_int> {
+    match orbit_fs.get_directory(parent) {
         Ok(_) => {}
         Err(e) => return Err(e),
     };
-    let fs_node = pfs.new_directory_node(
+    let fs_node = orbit_fs.new_directory_node(
         crate::RuntimeDirectory::default(),
         Some(InodeNumber(parent)),
     );
-    let inode_number = pfs.assign_inode_number(fs_node);
-    pfs.add_directory_entry(
+    let inode_number = orbit_fs.assign_inode_number(fs_node);
+    orbit_fs.add_directory_entry(
         InodeNumber(parent),
         crate::RuntimeDirectoryEntry {
             name: name.to_owned(),
@@ -105,7 +105,7 @@ pub fn mkdir(pfs: &mut Pfs, parent: u64, name: &str) -> Result<FileAttr, libc::c
 }
 
 pub fn create(
-    pfs: &mut Pfs,
+    orbit_fs: &mut OrbitFs,
     parent: u64,
     name: &str,
     flags: i32,
@@ -115,19 +115,26 @@ pub fn create(
     use libc::{O_RDWR, O_WRONLY};
     use std::fs::File;
 
-    let temp_file_path = pfs.data_dir.clone() + "/" + &Utc::now().to_rfc3339();
-    let fs_node =
-        pfs.new_file_node_with_persistence(ContentHash::default(), 0, Some(InodeNumber(parent)));
+    let temp_file_path = orbit_fs.data_dir.clone() + "/" + &Utc::now().to_rfc3339();
+    let fs_node = orbit_fs.new_file_node_with_persistence(
+        ContentHash::default(),
+        0,
+        Some(InodeNumber(parent)),
+    );
 
-    let inode_number = pfs.assign_inode_number(fs_node);
+    let inode_number = orbit_fs.assign_inode_number(fs_node);
     let open_file = crate::OpenFile {
         backing_file: File::create_new(&temp_file_path).map_err(|_| libc::EIO)?,
         parent_inode_number: InodeNumber(parent),
         path: std::path::PathBuf::from(temp_file_path),
         writable: (flags & O_WRONLY > 0) || (flags & O_RDWR > 0),
     };
-    pfs.runtime_data.write().open_files.push(Some(open_file));
-    pfs.add_directory_entry(
+    orbit_fs
+        .runtime_data
+        .write()
+        .open_files
+        .push(Some(open_file));
+    orbit_fs.add_directory_entry(
         InodeNumber(parent),
         crate::RuntimeDirectoryEntry {
             name: name.to_owned(),
@@ -135,11 +142,11 @@ pub fn create(
             inode_number,
         },
     )?;
-    let fh = (pfs.runtime_data.read().open_files.len() - 1) as u64;
+    let fh = (orbit_fs.runtime_data.read().open_files.len() - 1) as u64;
     Ok((as_file_attr(&fs_node, inode_number), fh))
 }
 
-pub fn open(pfs: &mut Pfs, ino: u64, flags: i32) -> Result<u64, libc::c_int> {
+pub fn open(orbit_fs: &mut OrbitFs, ino: u64, flags: i32) -> Result<u64, libc::c_int> {
     use base64::Engine;
     use std::fs::File;
     use std::path::PathBuf;
@@ -148,10 +155,10 @@ pub fn open(pfs: &mut Pfs, ino: u64, flags: i32) -> Result<u64, libc::c_int> {
     if writable {
         return Err(libc::ENOSYS);
     }
-    let fs_node = pfs.runtime_data.read().inodes[ino as usize];
+    let fs_node = orbit_fs.runtime_data.read().inodes[ino as usize];
     let content_hash = fs_node.content_hash;
     let path = PathBuf::from(
-        pfs.data_dir.clone()
+        orbit_fs.data_dir.clone()
             + "/"
             + &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(content_hash.0),
     );
@@ -162,14 +169,14 @@ pub fn open(pfs: &mut Pfs, ino: u64, flags: i32) -> Result<u64, libc::c_int> {
         path,
         writable,
     };
-    let mut runtime_data = pfs.runtime_data.write();
+    let mut runtime_data = orbit_fs.runtime_data.write();
     runtime_data.open_files.push(Some(open_file));
     let fh = (runtime_data.open_files.len() - 1) as u64;
     Ok(fh)
 }
 
 pub fn write(
-    pfs: &mut Pfs,
+    orbit_fs: &mut OrbitFs,
     _ino: u64,
     fh: u64,
     offset: i64,
@@ -177,7 +184,7 @@ pub fn write(
 ) -> Result<u32, libc::c_int> {
     use std::os::unix::fs::FileExt;
 
-    let mut runtime_data = pfs.runtime_data.write();
+    let mut runtime_data = orbit_fs.runtime_data.write();
     let open_file = runtime_data
         .open_files
         .get_mut(fh as usize)
@@ -191,7 +198,7 @@ pub fn write(
 }
 
 pub fn read(
-    pfs: &mut Pfs,
+    orbit_fs: &mut OrbitFs,
     _ino: u64,
     fh: u64,
     offset: i64,
@@ -199,7 +206,7 @@ pub fn read(
 ) -> Result<Vec<u8>, libc::c_int> {
     use std::io::{Read, Seek, SeekFrom};
 
-    let mut runtime_data = pfs.runtime_data.write();
+    let mut runtime_data = orbit_fs.runtime_data.write();
     let open_file = runtime_data
         .open_files
         .get_mut(fh as usize)
@@ -218,13 +225,13 @@ pub fn read(
     Ok(buf)
 }
 
-pub fn release(pfs: &mut Pfs, ino: u64, fh: u64) -> Result<(), libc::c_int> {
+pub fn release(orbit_fs: &mut OrbitFs, ino: u64, fh: u64) -> Result<(), libc::c_int> {
     use crate::ContentHash;
     use base64::Engine;
     use std::io::{Read, Seek};
 
     let mut open_file = {
-        let mut runtime_data = pfs.runtime_data.write();
+        let mut runtime_data = orbit_fs.runtime_data.write();
         std::mem::replace(&mut runtime_data.open_files[fh as usize], None).ok_or(libc::ENOENT)?
     };
     if !open_file.writable {
@@ -245,25 +252,25 @@ pub fn release(pfs: &mut Pfs, ino: u64, fh: u64) -> Result<(), libc::c_int> {
         size += n as u64;
     }
     let content_hash = ContentHash(hasher.finalize());
-    let new_file_path = pfs.data_dir.clone()
+    let new_file_path = orbit_fs.data_dir.clone()
         + "/"
         + &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(content_hash.0);
     std::fs::rename(&open_file.path, &new_file_path).map_err(|_| libc::EIO)?;
-    let old_fs_node = pfs.runtime_data.read().inodes[ino as usize];
+    let old_fs_node = orbit_fs.runtime_data.read().inodes[ino as usize];
     let new_fs_node =
-        pfs.new_file_node_with_persistence(content_hash, size, Some(InodeNumber(ino)));
-    pfs.update_directory_entry(
+        orbit_fs.new_file_node_with_persistence(content_hash, size, Some(InodeNumber(ino)));
+    orbit_fs.update_directory_entry(
         open_file.parent_inode_number,
         &old_fs_node.calculate_hash(),
         new_fs_node.calculate_hash(),
     )?;
-    pfs.runtime_data.write().inodes[ino as usize] = new_fs_node;
+    orbit_fs.runtime_data.write().inodes[ino as usize] = new_fs_node;
     Ok(())
 }
 
-pub fn lookup(pfs: &Pfs, parent: u64, name: &str) -> Result<FileAttr, libc::c_int> {
-    let (_fs_node, directory) = pfs.get_directory(parent)?;
-    let runtime_data = pfs.runtime_data.read();
+pub fn lookup(orbit_fs: &OrbitFs, parent: u64, name: &str) -> Result<FileAttr, libc::c_int> {
+    let (_fs_node, directory) = orbit_fs.get_directory(parent)?;
+    let runtime_data = orbit_fs.runtime_data.read();
     for entry in directory.entries.iter() {
         if entry.name == name {
             let fs_node = &runtime_data.inodes[entry.inode_number.0 as usize];
@@ -273,17 +280,17 @@ pub fn lookup(pfs: &Pfs, parent: u64, name: &str) -> Result<FileAttr, libc::c_in
     Err(libc::ENOENT)
 }
 
-pub fn unlink(pfs: &mut Pfs, parent: u64, name: &str) -> Result<(), libc::c_int> {
+pub fn unlink(orbit_fs: &mut OrbitFs, parent: u64, name: &str) -> Result<(), libc::c_int> {
     use crate::FileType;
 
-    let (_fs_node, directory) = pfs.get_directory(parent)?;
+    let (_fs_node, directory) = orbit_fs.get_directory(parent)?;
     let file_entry = directory
         .entries
         .iter()
         .find(|entry| entry.name == name)
         .ok_or(libc::ENOENT)?;
     let file_node_kind = {
-        let runtime_data = pfs.runtime_data.read();
+        let runtime_data = orbit_fs.runtime_data.read();
         runtime_data
             .inodes
             .get(file_entry.inode_number.0 as usize)
@@ -293,11 +300,11 @@ pub fn unlink(pfs: &mut Pfs, parent: u64, name: &str) -> Result<(), libc::c_int>
     if file_node_kind != FileType::RegularFile {
         return Err(libc::EISDIR);
     }
-    pfs.remove_directory_entry(InodeNumber(parent), name)
+    orbit_fs.remove_directory_entry(InodeNumber(parent), name)
 }
 
 pub fn rename(
-    pfs: &mut Pfs,
+    orbit_fs: &mut OrbitFs,
     parent: u64,
     name: &str,
     newparent: u64,
@@ -309,14 +316,14 @@ pub fn rename(
     if parent == newparent && name == newname {
         return Ok(());
     }
-    let (_source_fs_node, source_directory) = pfs.get_directory(parent)?;
+    let (_source_fs_node, source_directory) = orbit_fs.get_directory(parent)?;
     let source_entry = source_directory
         .entries
         .iter()
         .find(|entry| entry.name == name)
         .ok_or(libc::ENOENT)?
         .clone();
-    let (_dest_fs_node, dest_directory) = pfs.get_directory(newparent)?;
+    let (_dest_fs_node, dest_directory) = orbit_fs.get_directory(newparent)?;
     if no_replace
         && dest_directory
             .entries
@@ -326,7 +333,7 @@ pub fn rename(
         return Err(libc::EEXIST);
     }
     if parent != newparent {
-        let mut runtime_data = pfs.runtime_data.write();
+        let mut runtime_data = orbit_fs.runtime_data.write();
         let fs_node = runtime_data
             .inodes
             .get_mut(source_entry.inode_number.0 as usize)
@@ -338,12 +345,12 @@ pub fn rename(
         fs_node_hash: source_entry.fs_node_hash,
         inode_number: source_entry.inode_number,
     };
-    pfs.add_directory_entry(InodeNumber(newparent), new_entry)?;
-    pfs.remove_directory_entry(InodeNumber(parent), name)?;
+    orbit_fs.add_directory_entry(InodeNumber(newparent), new_entry)?;
+    orbit_fs.remove_directory_entry(InodeNumber(parent), name)?;
     Ok(())
 }
 
-impl Filesystem for Pfs {
+impl Filesystem for OrbitFs {
     fn getattr(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -450,13 +457,13 @@ impl Filesystem for Pfs {
                             "File {} is not present locally, requesting it from peers",
                             content_hash
                         );
-                        let mut pfs = self.clone();
+                        let mut orbit_fs = self.clone();
                         net.request_file_with_callback(
                             content_hash,
                             Duration::from_secs(10),
                             Box::new(move || {
                                 log::debug!("It seems like we received the file {} from a peer, try opening it again", content_hash);
-                                match open(&mut pfs, _ino, _flags) {
+                                match open(&mut orbit_fs, _ino, _flags) {
                                 Ok(fh) => reply.opened(fh, 0),
                                 Err(error) => {
                                     warn!("Failed to request file {} from peers", content_hash);

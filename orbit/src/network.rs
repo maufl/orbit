@@ -1,12 +1,12 @@
 use std::io::Write;
 use std::time::Duration;
 
-use crate::{Block, BlockHash, ContentHash, Directory, FsNode, InodeNumber, Pfs};
+use crate::{Block, BlockHash, ContentHash, Directory, FsNode, InodeNumber, OrbitFs};
 use base64::Engine;
 use bytes::{BufMut, Bytes, BytesMut};
+use iroh::discovery::mdns::MdnsDiscovery;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, NodeAddr, PublicKey, SecretKey};
-use iroh::discovery::mdns::MdnsDiscovery;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -14,7 +14,7 @@ use tokio::{
     sync::broadcast::{Receiver, Sender},
 };
 
-pub const APLN: &str = "de.maufl.pfs";
+pub const APLN: &str = "de.maufl.orbit";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Messages {
@@ -51,7 +51,6 @@ pub struct IrohNetworkCommunication {
 }
 
 impl IrohNetworkCommunication {
-
     pub async fn build(secret_key: SecretKey) -> anyhow::Result<IrohNetworkCommunication> {
         let endpoint = Endpoint::builder()
             .discovery(Box::new(MdnsDiscovery::new(secret_key.public())?))
@@ -71,12 +70,7 @@ impl IrohNetworkCommunication {
         })
     }
 
-
-    pub async fn connect_to_all_peers(
-        &self,
-        peer_node_ids: Vec<String>,
-        pfs: Pfs,
-    ) {
+    pub async fn connect_to_all_peers(&self, peer_node_ids: Vec<String>, orbit_fs: OrbitFs) {
         if peer_node_ids.is_empty() {
             info!("No peer nodes configured, running in standalone mode");
             return;
@@ -88,24 +82,29 @@ impl IrohNetworkCommunication {
             if let Err(e) = connect_to_peer(
                 peer_node_id.clone(),
                 self.endpoint.clone(),
-                pfs.clone(),
+                orbit_fs.clone(),
                 self.message_sender.clone(),
                 self.content_notification_sender.clone(),
             )
-                .await
+            .await
             {
                 warn!("Error connecting to peer {}: {}", peer_node_id, e)
             }
         }
     }
 
-    pub fn accept_connections(&self, pfs: Pfs) {
+    pub fn accept_connections(&self, orbit_fs: OrbitFs) {
         let endpoint = self.endpoint.clone();
         let message_sender = self.message_sender.clone();
         let content_notification_sender = self.content_notification_sender.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                accept_connections(endpoint, pfs, message_sender, content_notification_sender).await
+            if let Err(e) = accept_connections(
+                endpoint,
+                orbit_fs,
+                message_sender,
+                content_notification_sender,
+            )
+            .await
             {
                 warn!("Error accepting connections: {}", e);
             }
@@ -154,7 +153,7 @@ impl NetworkCommunication for IrohNetworkCommunication {
 pub async fn connect_to_peer(
     peer_node_id: String,
     endpoint: Endpoint,
-    pfs: Pfs,
+    orbit_fs: OrbitFs,
     sender: tokio::sync::broadcast::Sender<Messages>,
     content_notification_sender: tokio::sync::broadcast::Sender<ContentHash>,
 ) -> Result<(), anyhow::Error> {
@@ -172,7 +171,7 @@ pub async fn connect_to_peer(
         let Ok(conn) = endpoint.connect(node_addr, APLN.as_bytes()).await else {
             return warn!("Failed to connect to node {}", peer_node_id);
         };
-        if let Err(e) = open_connection(conn, pfs, sender, content_notification_sender).await {
+        if let Err(e) = open_connection(conn, orbit_fs, sender, content_notification_sender).await {
             warn!("Error while handling connection to {}: {}", peer_node_id, e);
         }
     });
@@ -180,10 +179,9 @@ pub async fn connect_to_peer(
     Ok(())
 }
 
-
 pub async fn accept_connections(
     endpoint: Endpoint,
-    pfs: Pfs,
+    orbit_fs: OrbitFs,
     sender: Sender<Messages>,
     content_notifier: Sender<ContentHash>,
 ) -> Result<(), anyhow::Error> {
@@ -193,14 +191,14 @@ pub async fn accept_connections(
                 "Accepted new connection from {}",
                 conn.remote_node_id().unwrap()
             );
-            let pfs = pfs.clone();
+            let orbit_fs_clone = orbit_fs.clone();
             let (net_sender, net_receiver) = conn.accept_bi().await?;
             let content_notifier = content_notifier.clone();
             let message_sender = sender.clone();
             handle_connection(
                 net_sender,
                 net_receiver,
-                pfs,
+                orbit_fs_clone,
                 content_notifier,
                 message_sender,
             )
@@ -214,7 +212,7 @@ pub async fn accept_connections(
 
 pub async fn open_connection(
     conn: Connection,
-    pfs: Pfs,
+    orbit_fs: OrbitFs,
     message_sender: Sender<Messages>,
     content_notifier: Sender<ContentHash>,
 ) -> Result<(), anyhow::Error> {
@@ -223,7 +221,7 @@ pub async fn open_connection(
     handle_connection(
         net_sender,
         net_receiver,
-        pfs,
+        orbit_fs,
         content_notifier,
         message_sender,
     )
@@ -233,17 +231,17 @@ pub async fn open_connection(
 pub async fn handle_connection(
     net_sender: SendStream,
     net_receiver: RecvStream,
-    pfs: Pfs,
+    orbit_fs: OrbitFs,
     content_notifier: Sender<ContentHash>,
     message_sender: Sender<Messages>,
 ) -> Result<(), anyhow::Error> {
     let receiver = message_sender.subscribe();
-    let current_block = pfs.runtime_data.read().current_block.clone();
+    let current_block = orbit_fs.runtime_data.read().current_block.clone();
     if let Err(e) = message_sender.send(Messages::Hello(current_block)) {
         warn!("Unable to queue hello message for new connection: {}", e);
     };
     tokio::spawn(async move {
-        listen_for_updates(net_receiver, message_sender, pfs, content_notifier)
+        listen_for_updates(net_receiver, message_sender, orbit_fs, content_notifier)
             .await
             .inspect_err(|e| warn!("Stopped listening for updates, encountered error {}", e))
     });
@@ -265,7 +263,7 @@ pub fn serialize_message(m: &Messages) -> Bytes {
 
 pub fn process_received_message(
     msg: Messages,
-    pfs: &mut Pfs,
+    orbit_fs: &mut OrbitFs,
     message_sender: &Sender<Messages>,
     content_notifier: &Sender<ContentHash>,
 ) {
@@ -273,7 +271,7 @@ pub fn process_received_message(
         Messages::NewDirectories(dirs) => {
             debug!("Received a NewDirectories message");
             for dir in dirs {
-                if let Err(e) = pfs.persistence.persist_directory(&dir) {
+                if let Err(e) = orbit_fs.persistence.persist_directory(&dir) {
                     warn!("Unable to persist directories: {}", e);
                 }
             }
@@ -281,7 +279,7 @@ pub fn process_received_message(
         Messages::NewFsNodes(nodes) => {
             debug!("Received a NewFsNodes message");
             for node in nodes {
-                if let Err(e) = pfs.persistence.persist_fs_node(&node) {
+                if let Err(e) = orbit_fs.persistence.persist_fs_node(&node) {
                     warn!("Unable to persist FS node: {}", e);
                 }
             }
@@ -289,19 +287,22 @@ pub fn process_received_message(
         Messages::BlockChanged(new_block) => {
             debug!("Received a BlockChanged message");
             // First persist the new block
-            if let Err(e) = pfs.persistence.persist_block(&new_block) {
+            if let Err(e) = orbit_fs.persistence.persist_block(&new_block) {
                 warn!("Unable to persist new block: {}", e);
                 return;
             }
 
             let new_root_hash = new_block.root_node_hash;
-            let old_root_hash = pfs.get_root_node().calculate_hash();
+            let old_root_hash = orbit_fs.get_root_node().calculate_hash();
             if let Err(e) =
-                pfs.update_directory_recursive(&old_root_hash, &new_root_hash, InodeNumber(1))
+                orbit_fs.update_directory_recursive(&old_root_hash, &new_root_hash, InodeNumber(1))
             {
                 error!("Unable to update root hash: {}", e);
             } else {
-                info!("New root hash is {}", pfs.get_root_node().calculate_hash());
+                info!(
+                    "New root hash is {}",
+                    orbit_fs.get_root_node().calculate_hash()
+                );
             }
         }
         Messages::Hello(block) => {
@@ -311,12 +312,12 @@ pub fn process_received_message(
                 block_hash
             );
             // Persist the block if we don't have it
-            if let Err(_) = pfs.persistence.load_block(&block_hash) {
+            if let Err(_) = orbit_fs.persistence.load_block(&block_hash) {
                 info!(
                     "The remote's block {} is unknown to us, persisting it",
                     block_hash
                 );
-                if let Err(e) = pfs.persistence.persist_block(&block) {
+                if let Err(e) = orbit_fs.persistence.persist_block(&block) {
                     warn!("Unable to persist block from hello: {}", e);
                 }
             } else {
@@ -325,7 +326,7 @@ pub fn process_received_message(
         }
         Messages::BlockRequest(block_hash) => {
             debug!("Received BlockRequest for {}", block_hash);
-            match pfs.persistence.load_block(&block_hash) {
+            match orbit_fs.persistence.load_block(&block_hash) {
                 Ok(block) => {
                     if let Err(e) = message_sender.send(Messages::BlockResponse(block)) {
                         warn!("Failed to send block response: {}", e);
@@ -338,13 +339,13 @@ pub fn process_received_message(
         }
         Messages::BlockResponse(block) => {
             debug!("Received BlockResponse");
-            if let Err(e) = pfs.persistence.persist_block(&block) {
+            if let Err(e) = orbit_fs.persistence.persist_block(&block) {
                 warn!("Unable to persist block from response: {}", e);
             }
         }
         Messages::ContentRequest(requested_content) => {
             for content_hash in requested_content.into_iter() {
-                let file_path = pfs.data_dir.clone()
+                let file_path = orbit_fs.data_dir.clone()
                     + "/"
                     + &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(content_hash.0);
                 let mut buf = BytesMut::new().writer();
@@ -366,7 +367,7 @@ pub fn process_received_message(
             }
         }
         Messages::ContentResponse((content_hash, bytes)) => {
-            let new_file_path = pfs.data_dir.clone()
+            let new_file_path = orbit_fs.data_dir.clone()
                 + "/"
                 + &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(content_hash.0);
             if let Err(e) = std::fs::write(&new_file_path, bytes.as_ref()) {
@@ -386,7 +387,7 @@ pub fn process_received_message(
 pub async fn listen_for_updates(
     mut net_receiver: RecvStream,
     message_sender: Sender<Messages>,
-    mut pfs: Pfs,
+    mut orbit_fs: OrbitFs,
     content_notifier: Sender<ContentHash>,
 ) -> Result<(), anyhow::Error> {
     use bytes::Buf;
@@ -413,7 +414,12 @@ pub async fn listen_for_updates(
                     current_buffer = reader.into_inner();
 
                     // Process the message using the extracted function
-                    process_received_message(msg, &mut pfs, &message_sender, &content_notifier);
+                    process_received_message(
+                        msg,
+                        &mut orbit_fs,
+                        &message_sender,
+                        &content_notifier,
+                    );
                 }
                 Err(_) => {
                     // Deserialization failed - rollback the buffer and stop trying

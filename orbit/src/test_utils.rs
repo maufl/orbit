@@ -1,21 +1,21 @@
-use crate::{ContentHash, Directory, DirectoryEntry, FileType, FsNode, FsNodeHash, Pfs};
+use crate::{ContentHash, Directory, DirectoryEntry, FileType, FsNode, FsNodeHash, OrbitFs};
 use chrono::Utc;
 use fuser::BackgroundSession;
 use std::fs;
 use std::io::Write;
 
-pub fn setup_pfs() -> Pfs {
+pub fn setup_orbit_fs() -> OrbitFs {
     let uuid = uuid::Uuid::new_v4();
-    let data_dir = format!("/tmp/{}/pfs_data", uuid);
+    let data_dir = format!("/tmp/{}/orbit_data", uuid);
     std::fs::create_dir_all(&data_dir).expect("To create the data dir");
-    Pfs::initialize(data_dir, None).expect("Failed to initialize filesystem")
+    OrbitFs::initialize(data_dir, None).expect("Failed to initialize filesystem")
 }
 
-pub fn setup() -> (BackgroundSession, String, Pfs) {
+pub fn setup() -> (BackgroundSession, String, OrbitFs) {
     let uuid = uuid::Uuid::new_v4();
-    let mount_point = format!("/tmp/{}/pfs", uuid);
+    let mount_point = format!("/tmp/{}/orbit", uuid);
     std::fs::create_dir_all(&mount_point).expect("To create the mount point");
-    let fs = setup_pfs();
+    let fs = setup_orbit_fs();
     let guard = fuser::spawn_mount2(fs.clone(), &mount_point, &vec![]).unwrap();
     (guard, mount_point, fs)
 }

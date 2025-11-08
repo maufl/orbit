@@ -2524,6 +2524,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
+name = "orbit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "chrono",
+ "ciborium",
+ "clap",
+ "env_logger",
+ "fjall",
+ "fuser",
+ "hex",
+ "hmac-sha256",
+ "iroh",
+ "libc",
+ "log",
+ "nix",
+ "parking_lot",
+ "rand 0.8.5",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml 0.8.23",
+ "uuid",
+]
+
+[[package]]
 name = "overload"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2663,34 +2691,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pfs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "bytes",
- "chrono",
- "ciborium",
- "clap",
- "env_logger",
- "fjall",
- "fuser",
- "hex",
- "hmac-sha256",
- "iroh",
- "libc",
- "log",
- "nix",
- "parking_lot",
- "rand 0.8.5",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "toml 0.8.23",
- "uuid",
-]
-
-[[package]]
 name = "pfs-uniffi"
 version = "0.1.0"
 dependencies = [
@@ -2698,7 +2698,7 @@ dependencies = [
  "anyhow",
  "hex",
  "log",
- "pfs",
+ "orbit",
  "thiserror 1.0.69",
  "tokio",
  "uniffi",

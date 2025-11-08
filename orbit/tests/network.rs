@@ -1,5 +1,5 @@
-use pfs::test_utils::*;
-use pfs::{FileType, FsNode, InodeNumber};
+use orbit::test_utils::*;
+use orbit::{FileType, FsNode, InodeNumber};
 use std::fs;
 use std::thread;
 use std::time::Duration;
@@ -249,7 +249,7 @@ fn test_diff_comprehensive_scenario() {
 
 #[test]
 fn test_update_directory_recursive_with_persistence() {
-    let mut fs = setup_pfs();
+    let mut fs = setup_orbit_fs();
 
     // Get the initial empty root directory
     let initial_root_node = fs.get_root_node();
@@ -328,8 +328,8 @@ fn test_update_directory_recursive_with_persistence() {
 
     // Test filesystem operations on the updated root directory
 
-    // 1. Use pfs_readdir to list contents of root folder (inode 1)
-    let dir_entries = pfs::fuse::readdir(&fs, 1, 0).expect("To read root directory");
+    // 1. Use orbit readdir to list contents of root folder (inode 1)
+    let dir_entries = orbit::fuse::readdir(&fs, 1, 0).expect("To read root directory");
 
     // Should have entries: ".", "..", and "test_file.txt"
     assert_eq!(
@@ -351,9 +351,9 @@ fn test_update_directory_recursive_with_persistence() {
     );
     let file_inode = file_entry.ino;
 
-    // 2. Use pfs_lookup to find the file by name
-    let lookup_attrs = pfs::fuse::lookup(&fs, 1, "test_file.txt")
-        .expect("To lookup test_file.txt");
+    // 2. Use orbit lookup to find the file by name
+    let lookup_attrs =
+        orbit::fuse::lookup(&fs, 1, "test_file.txt").expect("To lookup test_file.txt");
     assert_eq!(
         lookup_attrs.ino, file_inode,
         "Lookup should return same inode as readdir"
@@ -368,8 +368,8 @@ fn test_update_directory_recursive_with_persistence() {
         "File size should be 100 as we set it"
     );
 
-    // 3. Use pfs_getattr to get file attributes by inode
-    let file_attrs = pfs::fuse::getattr(&fs, file_inode).expect("To get file attributes");
+    // 3. Use orbit getattr to get file attributes by inode
+    let file_attrs = orbit::fuse::getattr(&fs, file_inode).expect("To get file attributes");
     assert_eq!(
         file_attrs.ino, file_inode,
         "Getattr should return correct inode"
@@ -401,7 +401,7 @@ fn test_update_directory_recursive_with_persistence() {
 
 #[test]
 fn test_update_directory_recursive_preserves_parent_references() {
-    let mut fs = setup_pfs();
+    let mut fs = setup_orbit_fs();
 
     // Create initial directory with a file
     let file1_node = create_test_file_node(50);
@@ -451,14 +451,14 @@ fn test_update_directory_recursive_preserves_parent_references() {
         .expect("To update directory recursive");
 
     // Now verify that the file can be properly accessed
-    let dir_entries = pfs::fuse::readdir(&fs, 1, 0).expect("To read root directory");
+    let dir_entries = orbit::fuse::readdir(&fs, 1, 0).expect("To read root directory");
     let file_entry = dir_entries
         .iter()
         .find(|entry| entry.name == "file1.txt")
         .expect("Should find file1.txt in directory listing");
 
     // The key test: lookup should work (this would fail if parent_inode_number was None)
-    let lookup_attrs = pfs::fuse::lookup(&fs, 1, "file1.txt")
+    let lookup_attrs = orbit::fuse::lookup(&fs, 1, "file1.txt")
         .expect("To lookup file1.txt - this tests parent reference");
     assert_eq!(lookup_attrs.size, 75, "Should show updated file size");
     assert_eq!(
@@ -467,14 +467,13 @@ fn test_update_directory_recursive_preserves_parent_references() {
     );
 
     // Verify getattr also works
-    let file_attrs = pfs::fuse::getattr(&fs, file_entry.ino)
-        .expect("To get file attributes");
+    let file_attrs = orbit::fuse::getattr(&fs, file_entry.ino).expect("To get file attributes");
     assert_eq!(file_attrs.size, 75, "Getattr should show updated file size");
 }
 
 #[test]
 fn test_network_sync_scenario() {
-    let mut fs = setup_pfs();
+    let mut fs = setup_orbit_fs();
 
     // Simulate the initial state - empty filesystem
     let initial_root = fs.get_root_node();
@@ -510,7 +509,7 @@ fn test_network_sync_scenario() {
     // Now test that ls-like operations work:
 
     // 1. readdir should show the file
-    let entries = pfs::fuse::readdir(&fs, 1, 0).expect("To read directory");
+    let entries = orbit::fuse::readdir(&fs, 1, 0).expect("To read directory");
     let file_entry = entries
         .iter()
         .find(|e| e.name == "synced_file.txt")
@@ -519,7 +518,7 @@ fn test_network_sync_scenario() {
     println!("File entry inode: {}", file_entry.ino);
 
     // 2. lookup should work (this is what ls does for each file)
-    let lookup_result = pfs::fuse::lookup(&fs, 1, "synced_file.txt");
+    let lookup_result = orbit::fuse::lookup(&fs, 1, "synced_file.txt");
     match lookup_result {
         Ok(attrs) => {
             println!("Lookup succeeded: inode={}, size={}", attrs.ino, attrs.size);
@@ -534,7 +533,7 @@ fn test_network_sync_scenario() {
     }
 
     // 3. getattr should work on the inode
-    let getattr_result = pfs::fuse::getattr(&fs, file_entry.ino);
+    let getattr_result = orbit::fuse::getattr(&fs, file_entry.ino);
     match getattr_result {
         Ok(attrs) => {
             println!(
@@ -554,7 +553,7 @@ fn test_network_sync_scenario() {
 
 #[test]
 fn test_network_sync_existing_file_update() {
-    let mut fs = setup_pfs();
+    let mut fs = setup_orbit_fs();
 
     // Start by creating a file in the normal way (like local filesystem operations)
     let initial_root = fs.get_root_node();
@@ -586,7 +585,7 @@ fn test_network_sync_existing_file_update() {
     .expect("To set up initial state with file");
 
     // Verify the file works initially
-    let entries = pfs::fuse::readdir(&fs, 1, 0).expect("To read directory initially");
+    let entries = orbit::fuse::readdir(&fs, 1, 0).expect("To read directory initially");
     let file_entry_v1 = entries
         .iter()
         .find(|e| e.name == "shared_file.txt")
@@ -594,10 +593,8 @@ fn test_network_sync_existing_file_update() {
 
     println!("Initial file inode: {}", file_entry_v1.ino);
 
-    pfs::fuse::lookup(&fs, 1, "shared_file.txt")
-        .expect("Initial lookup should work");
-    pfs::fuse::getattr(&fs, file_entry_v1.ino)
-        .expect("Initial getattr should work");
+    orbit::fuse::lookup(&fs, 1, "shared_file.txt").expect("Initial lookup should work");
+    orbit::fuse::getattr(&fs, file_entry_v1.ino).expect("Initial getattr should work");
 
     // Now simulate network sync updating this same file (same name, different content)
     let file_v2_node = create_test_file_node(750); // Different size
@@ -622,8 +619,7 @@ fn test_network_sync_existing_file_update() {
         .expect("To update to v2 via network sync");
 
     // Now test if the updated file is accessible (this is where the bug manifests)
-    let entries_v2 = pfs::fuse::readdir(&fs, 1, 0)
-        .expect("To read directory after update");
+    let entries_v2 = orbit::fuse::readdir(&fs, 1, 0).expect("To read directory after update");
     let file_entry_v2 = entries_v2
         .iter()
         .find(|e| e.name == "shared_file.txt")
@@ -637,7 +633,7 @@ fn test_network_sync_existing_file_update() {
     }
 
     // The critical test: can we look up the updated file?
-    let lookup_result = pfs::fuse::lookup(&fs, 1, "shared_file.txt");
+    let lookup_result = orbit::fuse::lookup(&fs, 1, "shared_file.txt");
     match lookup_result {
         Ok(attrs) => {
             println!(
@@ -647,7 +643,7 @@ fn test_network_sync_existing_file_update() {
             assert_eq!(attrs.size, 750, "Should show updated size");
 
             // Also test getattr
-            let getattr_result = pfs::fuse::getattr(&fs, attrs.ino);
+            let getattr_result = orbit::fuse::getattr(&fs, attrs.ino);
             match getattr_result {
                 Ok(getattr_attrs) => {
                     println!(

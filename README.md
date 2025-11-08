@@ -9,7 +9,7 @@ A content-addressed filesystem implemented in Rust using FUSE. Files are stored 
 cargo build --release
 
 # Run filesystem daemon
-cargo run --bin pfsd
+cargo run --bin orbitd
 
 # Run tests (single-threaded for FUSE compatibility)
 cargo test --test basics -- --test-threads=1

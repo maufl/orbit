@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 
-use crate::persistence::{Persistence, PfsPersistence};
+use crate::persistence::{OrbitFsPersitence, Persistence};
 
 pub mod config;
 #[cfg(feature = "fuse")]
@@ -288,7 +288,7 @@ pub struct RuntimeDirectoryEntryInfo {
     pub name: String,
 }
 
-struct PfsRuntimeData {
+struct OrbitFsRuntimeData {
     directories: BTreeMap<ContentHash, RuntimeDirectory>,
     inodes: Vec<RuntimeFsNode>,
     open_files: Vec<Option<OpenFile>>,
@@ -296,23 +296,23 @@ struct PfsRuntimeData {
 }
 
 #[derive(Clone)]
-pub struct Pfs {
-    runtime_data: Arc<RwLock<PfsRuntimeData>>,
+pub struct OrbitFs {
+    runtime_data: Arc<RwLock<OrbitFsRuntimeData>>,
     pub data_dir: String,
     pub persistence: Arc<dyn Persistence>,
     network_communication: Option<Arc<dyn NetworkCommunication>>,
 }
 
-impl Pfs {
+impl OrbitFs {
     pub fn initialize(
         data_dir: String,
         network_communication: Option<Arc<dyn NetworkCommunication>>,
-    ) -> Result<Pfs, Box<dyn std::error::Error>> {
-        let persistence = Arc::new(PfsPersistence::new(&data_dir)?);
+    ) -> Result<OrbitFs, Box<dyn std::error::Error>> {
+        let persistence = Arc::new(OrbitFsPersitence::new(&data_dir)?);
 
-        let mut pfs = Pfs {
+        let mut orbit_fs = OrbitFs {
             data_dir: data_dir.clone(),
-            runtime_data: Arc::new(RwLock::new(PfsRuntimeData {
+            runtime_data: Arc::new(RwLock::new(OrbitFsRuntimeData {
                 directories: BTreeMap::new(),
                 inodes: vec![RuntimeFsNode::default(); 1],
                 open_files: Vec::new(),
@@ -323,11 +323,11 @@ impl Pfs {
         };
 
         // Try to load existing data
-        if let Err(e) = pfs.restore_filesystem_tree() {
+        if let Err(e) = orbit_fs.restore_filesystem_tree() {
             warn!("Failed to load persisted data, starting fresh: {}", e);
             // Start fresh if loading fails
             {
-                let mut runtime_data = pfs.runtime_data.write();
+                let mut runtime_data = orbit_fs.runtime_data.write();
                 runtime_data.directories.clear();
                 runtime_data.inodes = vec![RuntimeFsNode::default(); 1];
             }
@@ -339,25 +339,29 @@ impl Pfs {
                 parent_inode_number: None,
                 size: 0,
             };
-            pfs.persistence
+            orbit_fs
+                .persistence
                 .persist_directory(&(&initial_directory).into())?;
-            pfs.persistence.persist_fs_node(&initial_root_node.into())?;
-            pfs.runtime_data
+            orbit_fs
+                .persistence
+                .persist_fs_node(&initial_root_node.into())?;
+            orbit_fs
+                .runtime_data
                 .write()
                 .directories
                 .insert(initial_root_node.content_hash, initial_directory);
-            pfs.assign_inode_number(initial_root_node.clone());
+            orbit_fs.assign_inode_number(initial_root_node.clone());
 
             // Create and persist the initial block
             let initial_block =
                 Block::new(initial_root_node.calculate_hash(), BlockHash::default());
-            if let Err(e) = pfs.persistence.persist_block(&initial_block) {
+            if let Err(e) = orbit_fs.persistence.persist_block(&initial_block) {
                 error!("Failed to persist initial block: {}", e);
             }
-            pfs.runtime_data.write().current_block = initial_block;
+            orbit_fs.runtime_data.write().current_block = initial_block;
         }
 
-        Ok(pfs)
+        Ok(orbit_fs)
     }
 
     pub fn get_root_node(&self) -> RuntimeFsNode {
@@ -683,7 +687,7 @@ impl Pfs {
     }
 }
 
-impl Drop for Pfs {
+impl Drop for OrbitFs {
     fn drop(&mut self) {
         self.persistence
             .persist_all()

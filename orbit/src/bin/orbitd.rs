@@ -1,9 +1,7 @@
 use clap::Parser;
-use pfs::Pfs;
-use pfs::config::Config;
-use pfs::network::{
-    NetworkCommunication, IrohNetworkCommunication,
-};
+use orbit::OrbitFs;
+use orbit::config::Config;
+use orbit::network::{IrohNetworkCommunication, NetworkCommunication};
 use std::sync::Arc;
 use std::{path::PathBuf, thread};
 use tokio::sync::broadcast::Receiver;
@@ -11,8 +9,8 @@ use tokio::sync::broadcast::Receiver;
 use log::{LevelFilter, debug, error, info};
 
 #[derive(Parser)]
-#[command(name = "pfsd")]
-#[command(about = "PFS daemon for distributed content-addressed filesystem")]
+#[command(name = "orbitd")]
+#[command(about = "Orbit daemon for distributed content-addressed filesystem")]
 struct Args {
     /// Path to configuration file
     #[arg(short, long)]
@@ -22,12 +20,15 @@ struct Args {
     remote_node: Option<String>,
 }
 
-fn initialize_pfs(config: &Config, network_communication: Arc<dyn NetworkCommunication>) -> Pfs {
+fn initialize_orbit_fs(
+    config: &Config,
+    network_communication: Arc<dyn NetworkCommunication>,
+) -> OrbitFs {
     let data_dir = &config.data_dir;
     std::fs::create_dir_all(data_dir).expect("To create the data dir");
     std::fs::create_dir_all(format!("{}/tmp", data_dir)).expect("To create the temporary file dir");
 
-    Pfs::initialize(data_dir.clone(), Some(network_communication))
+    OrbitFs::initialize(data_dir.clone(), Some(network_communication))
         .expect("Failed to initialize filesystem")
 }
 
@@ -35,7 +36,7 @@ fn initialize_pfs(config: &Config, network_communication: Arc<dyn NetworkCommuni
 async fn main() -> Result<(), anyhow::Error> {
     env_logger::Builder::from_default_env()
         .filter(None, LevelFilter::Warn)
-        .filter(Some("pfs"), LevelFilter::Debug)
+        .filter(Some("orbit"), LevelFilter::Debug)
         .init();
 
     let args = Args::parse();
@@ -60,21 +61,22 @@ async fn main() -> Result<(), anyhow::Error> {
     );
     let (shutdown_sender, shutdown_receiver) = tokio::sync::broadcast::channel(1);
     let iroh_network_communication = Arc::new(IrohNetworkCommunication::build(secret_key).await?);
-    let pfs = initialize_pfs(&config, iroh_network_communication.clone());
+    let orbit_fs = initialize_orbit_fs(&config, iroh_network_communication.clone());
     info!(
         "Current root hash is {}",
-        pfs.get_root_node().calculate_hash()
+        orbit_fs.get_root_node().calculate_hash()
     );
     {
-        let pfs = pfs.clone();
+        let orbit_fs = orbit_fs.clone();
         let mount_point = config.mount_point.clone();
-        thread::spawn(move || run_fs(pfs, mount_point, shutdown_receiver));
+        thread::spawn(move || run_fs(orbit_fs, mount_point, shutdown_receiver));
     }
-
 
     // Connect to all peer node IDs from config
     let peer_node_ids = config.peer_node_ids.clone();
-    iroh_network_communication.connect_to_all_peers(peer_node_ids, pfs).await;
+    iroh_network_communication
+        .connect_to_all_peers(peer_node_ids, orbit_fs)
+        .await;
     // Keep the main task running indefinitely in standalone mode
     tokio::signal::ctrl_c().await?;
     let _ = shutdown_sender.send(());
@@ -83,7 +85,7 @@ async fn main() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-fn run_fs(fs: Pfs, mount_point: String, mut close_receiver: Receiver<()>) {
+fn run_fs(fs: OrbitFs, mount_point: String, mut close_receiver: Receiver<()>) {
     if let Err(e) = std::fs::create_dir_all(&mount_point) {
         error!("Failed to ensure mount point exists: {}", e);
         return;

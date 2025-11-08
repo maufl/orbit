@@ -1,5 +1,5 @@
 [package]
-name = "pfs"
+name = "orbit"
 version = "0.1.0"
 edition = "2024"
 
@@ -28,8 +28,8 @@ uuid = { version = "1.17.0", features = ["v4"], optional = true }
 thiserror = "1.0"
 
 [[bin]]
-name = "pfsd"
-path = "src/bin/pfsd.rs"
+name = "orbitd"
+path = "src/bin/orbitd.rs"
 required-features = ["fuse"]
 
 [[bin]]

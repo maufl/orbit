@@ -31,7 +31,7 @@ impl Default for Config {
 
         Self {
             private_key: None,
-            data_dir: format!("{}/pfs_data", data_home),
+            data_dir: format!("{}/orbit_data", data_home),
             mount_point: format!("{}/Orbit", home),
             peer_node_ids: Vec::new(),
         }
@@ -59,7 +59,7 @@ impl Config {
             let home = env::var("HOME").expect("HOME environment variable must be set");
             format!("{}/.config", home)
         });
-        PathBuf::from(config_home).join("pfsd.toml")
+        PathBuf::from(config_home).join("orbitd.toml")
     }
 
     pub fn load_or_create(path: PathBuf) -> Result<Self, Error> {

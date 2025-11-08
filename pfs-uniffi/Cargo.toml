@@ -8,7 +8,7 @@ crate-type = ["cdylib"]
 name = "pfs_uniffi"
 
 [dependencies]
-pfs = { path = "../pfs" }
+orbit = { path = "../orbit" }
 uniffi = "0.29"
 thiserror = "1.0"
 tokio = { version = "1.45", features = ["rt", "rt-multi-thread"] }

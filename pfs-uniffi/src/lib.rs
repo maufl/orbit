@@ -1,10 +1,10 @@
 // UniFFI bindings for PFS - exposes a simplified API for Kotlin/Swift/Python
 // This is a separate library target that wraps the main PFS functionality
 
-use pfs::network::IrohNetworkCommunication;
-use pfs::Pfs;
-use std::sync::Arc;
 use log::info;
+use orbit::network::IrohNetworkCommunication;
+use orbit::OrbitFs;
+use std::sync::Arc;
 
 uniffi::setup_scaffolding!();
 
@@ -22,7 +22,7 @@ pub struct Config {
 #[derive(uniffi::Object)]
 pub struct PfsClient {
     #[allow(dead_code)]
-    pfs: Pfs,
+    pfs: OrbitFs,
     config: Config,
     #[allow(dead_code)]
     runtime: tokio::runtime::Runtime,
@@ -50,10 +50,10 @@ impl PfsClient {
                     .with_tag("PFS")
                     .with_filter(
                         android_logger::FilterBuilder::new()
-                            .filter_module("pfs", log::LevelFilter::Debug)
+                            .filter_module("orbit", log::LevelFilter::Debug)
                             .filter_module("pfs_uniffi", log::LevelFilter::Debug)
-                            .build()
-                    )
+                            .build(),
+                    ),
             );
         }
         let data_dir = &config.data_dir;
@@ -63,43 +63,52 @@ impl PfsClient {
         std::fs::create_dir_all(format!("{}/tmp", data_dir))?;
 
         // Build network communication using tokio runtime
-        let runtime = tokio::runtime::Runtime::new().map_err(|e| {
-            PfsError::InitializationError {
+        let runtime =
+            tokio::runtime::Runtime::new().map_err(|e| PfsError::InitializationError {
                 error_message: format!("Failed to create tokio runtime: {}", e),
-            }
-        })?;
+            })?;
 
         let secret_key = if let Some(private_key) = &config.private_key {
-            pfs::config::decode_secret_key(&private_key).map_err(|e| PfsError::InitializationError { error_message: format!("Failed to decode private key: {}", e) })?
+            orbit::config::decode_secret_key(&private_key).map_err(|e| {
+                PfsError::InitializationError {
+                    error_message: format!("Failed to decode private key: {}", e),
+                }
+            })?
         } else {
-            pfs::config::new_secret_key()
+            orbit::config::new_secret_key()
         };
-        info!("The node ID is {}", hex::encode(secret_key.public().as_bytes()));
+        info!(
+            "The node ID is {}",
+            hex::encode(secret_key.public().as_bytes())
+        );
 
         // Update config with the secret key (either the one provided or newly generated)
         let mut final_config = config.clone();
         if final_config.private_key.is_none() {
-            final_config.private_key = Some(pfs::config::encode_secret_key(&secret_key));
+            final_config.private_key = Some(orbit::config::encode_secret_key(&secret_key));
         }
 
-        let network_communication = runtime
-            .block_on(async {
-                IrohNetworkCommunication::build(secret_key)
-                    .await
-                    .map_err(|e| PfsError::InitializationError {
-                        error_message: format!("Failed to build network communication: {}", e),
-                    })
-            })?;
+        let network_communication = runtime.block_on(async {
+            IrohNetworkCommunication::build(secret_key)
+                .await
+                .map_err(|e| PfsError::InitializationError {
+                    error_message: format!("Failed to build network communication: {}", e),
+                })
+        })?;
 
         let network_communication = Arc::new(network_communication);
 
         // Initialize PFS
-        let pfs = Pfs::initialize(data_dir.clone(), Some(network_communication.clone()))
+        let pfs = OrbitFs::initialize(data_dir.clone(), Some(network_communication.clone()))
             .map_err(|e| PfsError::InitializationError {
                 error_message: format!("Failed to initialize PFS: {}", e),
             })?;
 
-        Ok(PfsClient { pfs, config: final_config, runtime })
+        Ok(PfsClient {
+            pfs,
+            config: final_config,
+            runtime,
+        })
     }
 
     pub fn get_config(&self) -> Config {

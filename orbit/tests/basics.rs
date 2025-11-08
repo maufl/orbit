@@ -1,5 +1,5 @@
-use pfs::test_utils::*;
-use pfs::Pfs;
+use orbit::OrbitFs;
+use orbit::test_utils::*;
 use std::fs;
 use std::io::Write;
 use std::thread;
@@ -389,8 +389,8 @@ fn rename_file_to_existing_file() {
 #[test]
 fn test_persistence_infrastructure() {
     let uuid = uuid::Uuid::new_v4();
-    let mount_point = format!("/tmp/{}/pfs", uuid);
-    let data_dir = format!("/tmp/{}/pfs_data", uuid);
+    let mount_point = format!("/tmp/{}/orbit", uuid);
+    let data_dir = format!("/tmp/{}/orbit_data", uuid);
 
     // Create directories
     std::fs::create_dir_all(&mount_point).expect("To create the mount point");
@@ -404,7 +404,8 @@ fn test_persistence_infrastructure() {
 
     // First filesystem session - create files and directories
     {
-        let fs = Pfs::initialize(data_dir.clone(), None).expect("Failed to initialize filesystem");
+        let fs =
+            OrbitFs::initialize(data_dir.clone(), None).expect("Failed to initialize filesystem");
         let guard = fuser::spawn_mount2(fs, &mount_point, &vec![]).unwrap();
         thread::sleep(Duration::from_millis(100));
 
@@ -460,7 +461,8 @@ fn test_persistence_infrastructure() {
 
     // Second filesystem session - verify the persistence infrastructure works
     {
-        let fs = Pfs::initialize(data_dir.clone(), None).expect("Failed to initialize filesystem");
+        let fs =
+            OrbitFs::initialize(data_dir.clone(), None).expect("Failed to initialize filesystem");
         let guard = fuser::spawn_mount2(fs, &mount_point, &vec![]).unwrap();
         thread::sleep(Duration::from_millis(100));
 
