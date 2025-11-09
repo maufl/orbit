@@ -788,4 +788,79 @@ impl OrbitFsWrapper {
 
         Ok(entries)
     }
+
+    /// Create a new empty file with the given name in the parent directory
+    /// Returns the content hash of the empty file
+    pub fn create_file(
+        &mut self,
+        parent_path: &str,
+        filename: &str,
+    ) -> Result<ContentHash, String> {
+        // Validate filename
+        if filename.is_empty() {
+            return Err("Filename cannot be empty".to_string());
+        }
+        if filename.contains('/') {
+            return Err("Filename cannot contain '/'".to_string());
+        }
+
+        // Get parent directory node
+        let parent_node = self.traverse_to_node(parent_path)?;
+        if !parent_node.is_directory() {
+            return Err(format!("Parent is not a directory: {}", parent_path));
+        }
+
+        // Get parent inode number
+        let parent_inode = {
+            let runtime_data = self.orbit_fs.runtime_data.read();
+            runtime_data
+                .inodes
+                .iter()
+                .position(|n| n.content_hash == parent_node.content_hash)
+                .map(|idx| InodeNumber(idx as u64))
+                .ok_or_else(|| "Parent inode not found".to_string())?
+        };
+
+        // Create empty file content (hash of empty data)
+        let empty_content_hash = ContentHash(hmac_sha256::Hash::hash(&[]));
+
+        // Create file in the data directory
+        let file_path = format!("{}/{}", self.orbit_fs.data_dir, empty_content_hash);
+        std::fs::write(&file_path, &[]).map_err(|e| format!("Failed to create file: {}", e))?;
+
+        // Create FsNode for the new file
+        let file_node =
+            self.orbit_fs
+                .new_file_node_with_persistence(empty_content_hash, 0, Some(parent_inode));
+        let file_node_hash = file_node.calculate_hash();
+
+        // Add entry to parent directory
+        let new_entry = RuntimeDirectoryEntry {
+            name: filename.to_string(),
+            fs_node_hash: file_node_hash,
+            inode_number: self.orbit_fs.assign_inode_number(file_node),
+        };
+
+        self.orbit_fs
+            .add_directory_entry(parent_inode, new_entry)
+            .map_err(|e| format!("Failed to add directory entry: {}", e))?;
+
+        Ok(empty_content_hash)
+    }
+
+    /// Get the backing file path for a given Orbit file path
+    /// Returns the absolute path to the content file on disk
+    pub fn get_backing_file_path(&self, path: &str) -> Result<String, String> {
+        let node = self.traverse_to_node(path)?;
+
+        // Only regular files have backing files
+        if node.is_directory() {
+            return Err(format!("Path is a directory: {}", path));
+        }
+
+        // Construct the backing file path from content hash
+        let backing_path = format!("{}/{}", self.orbit_fs.data_dir, node.content_hash);
+
+        Ok(backing_path)
+    }
 }

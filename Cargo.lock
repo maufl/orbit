@@ -2560,6 +2560,7 @@ dependencies = [
  "hex",
  "log",
  "orbit",
+ "parking_lot",
  "thiserror 1.0.69",
  "tokio",
  "uniffi",

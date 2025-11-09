@@ -4,6 +4,7 @@
 use log::info;
 use orbit::network::IrohNetworkCommunication;
 use orbit::{FileType, FsNode, OrbitFs, OrbitFsWrapper};
+use parking_lot::RwLock;
 use std::sync::Arc;
 
 uniffi::setup_scaffolding!();
@@ -21,7 +22,7 @@ pub struct Config {
 /// A simplified Orbit client for use from foreign language bindings
 #[derive(uniffi::Object)]
 pub struct OrbitClient {
-    fs_wrapper: OrbitFsWrapper,
+    fs_wrapper: RwLock<OrbitFsWrapper>,
     config: Config,
     #[allow(dead_code)]
     runtime: tokio::runtime::Runtime,
@@ -102,7 +103,7 @@ impl OrbitClient {
         let fs_wrapper = OrbitFsWrapper::new(orbit_fs);
 
         Ok(OrbitClient {
-            fs_wrapper,
+            fs_wrapper: RwLock::new(fs_wrapper),
             config: final_config,
             runtime,
         })
@@ -117,6 +118,7 @@ impl OrbitClient {
     pub fn get_node_by_path(&self, path: String) -> Result<FsNodeInfo, OrbitError> {
         let node = self
             .fs_wrapper
+            .read()
             .get_node_by_path(&path)
             .map_err(|e| OrbitError::PathNotFound { path: e })?;
         Ok(FsNodeInfo::from_fs_node(&node))
@@ -126,6 +128,7 @@ impl OrbitClient {
     pub fn list_directory(&self, path: String) -> Result<Vec<DirectoryEntryInfo>, OrbitError> {
         let entries = self
             .fs_wrapper
+            .read()
             .list_directory(&path)
             .map_err(|e| OrbitError::PathNotFound { path: e })?;
 
@@ -143,6 +146,23 @@ impl OrbitClient {
             .collect();
 
         Ok(result)
+    }
+
+    /// Create a new empty file with the given name in the parent directory
+    pub fn create_file(&self, parent_path: String, filename: String) -> Result<(), OrbitError> {
+        self.fs_wrapper
+            .write()
+            .create_file(&parent_path, &filename)
+            .map_err(|e| OrbitError::PathNotFound { path: e })?;
+        Ok(())
+    }
+
+    /// Get the backing file path for a given Orbit file path
+    pub fn get_backing_file_path(&self, path: String) -> Result<String, OrbitError> {
+        self.fs_wrapper
+            .read()
+            .get_backing_file_path(&path)
+            .map_err(|e| OrbitError::PathNotFound { path: e })
     }
 }
 
