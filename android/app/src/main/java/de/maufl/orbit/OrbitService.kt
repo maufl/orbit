@@ -74,4 +74,12 @@ class OrbitService : Service() {
     fun getDirectoryEntries(path: String) : List<DirectoryEntryInfo> {
         return orbitClient.listDirectory(path)
     }
+
+    fun createFile(parentPath: String, filename: String) {
+        orbitClient.createFile(parentPath, filename)
+    }
+
+    fun getBackingFilePath(path: String) : String {
+        return orbitClient.getBackingFilePath(path)
+    }
 }
