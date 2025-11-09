@@ -3,15 +3,19 @@ package de.maufl.orbit
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.os.Binder
 import android.os.IBinder
 import android.util.Log
 import uniffi.orbit_android.Config
 import uniffi.orbit_android.OrbitClient
 import androidx.core.content.edit
+import uniffi.orbit_android.DirectoryEntryInfo
+import uniffi.orbit_android.FsNodeInfo
 
 class OrbitService : Service() {
 
-    lateinit var orbitClient: OrbitClient
+    lateinit private var orbitClient: OrbitClient
+    private val binder = OrbitBinder()
 
     companion object {
         private const val TAG = "OrbitService"
@@ -19,8 +23,13 @@ class OrbitService : Service() {
         private const val KEY_PRIVATE_KEY = "private_key"
     }
 
+    inner class OrbitBinder : Binder() {
+        fun getService(): OrbitService = this@OrbitService
+    }
+
     override fun onBind(intent: Intent): IBinder {
-        TODO("Return the communication channel to the service.")
+        Log.d(TAG, "onBind called")
+        return binder
     }
 
     override fun onCreate() {
@@ -56,5 +65,13 @@ class OrbitService : Service() {
                 Log.i(TAG, "Saved new secret key to SharedPreferences")
             }
         }
+    }
+
+    fun getFsNodeByPath(path: String) : FsNodeInfo {
+        return orbitClient.getNodeByPath(path)
+    }
+
+    fun getDirectoryEntries(path: String) : List<DirectoryEntryInfo> {
+        return orbitClient.listDirectory(path)
     }
 }

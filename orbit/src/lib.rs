@@ -217,7 +217,7 @@ impl RuntimeDirectory {
         ContentHash(calculate_hash(&self))
     }
 
-    fn entry_by_name(&self, name: &str) -> Option<&RuntimeDirectoryEntry> {
+    pub fn entry_by_name(&self, name: &str) -> Option<&RuntimeDirectoryEntry> {
         self.entries.iter().find(|e| e.name == name)
     }
 }
@@ -288,16 +288,16 @@ pub struct RuntimeDirectoryEntryInfo {
     pub name: String,
 }
 
-struct OrbitFsRuntimeData {
-    directories: BTreeMap<ContentHash, RuntimeDirectory>,
-    inodes: Vec<RuntimeFsNode>,
-    open_files: Vec<Option<OpenFile>>,
-    current_block: Block,
+pub struct OrbitFsRuntimeData {
+    pub directories: BTreeMap<ContentHash, RuntimeDirectory>,
+    pub inodes: Vec<RuntimeFsNode>,
+    pub open_files: Vec<Option<OpenFile>>,
+    pub current_block: Block,
 }
 
 #[derive(Clone)]
 pub struct OrbitFs {
-    runtime_data: Arc<RwLock<OrbitFsRuntimeData>>,
+    pub runtime_data: Arc<RwLock<OrbitFsRuntimeData>>,
     pub data_dir: String,
     pub persistence: Arc<dyn Persistence>,
     network_communication: Option<Arc<dyn NetworkCommunication>>,
@@ -692,5 +692,100 @@ impl Drop for OrbitFs {
         self.persistence
             .persist_all()
             .expect("To be able to persist metadata")
+    }
+}
+
+/// Wrapper struct providing path-based access to OrbitFs
+pub struct OrbitFsWrapper {
+    orbit_fs: OrbitFs,
+}
+
+impl OrbitFsWrapper {
+    pub fn new(orbit_fs: OrbitFs) -> Self {
+        OrbitFsWrapper { orbit_fs }
+    }
+
+    /// Traverse the filesystem tree to find a node by path
+    /// Returns the RuntimeFsNode for further processing
+    fn traverse_to_node(&self, path: &str) -> Result<RuntimeFsNode, String> {
+        // Normalize path - remove leading/trailing slashes and split
+        let path = path.trim_matches('/');
+
+        // Handle root directory
+        if path.is_empty() {
+            return Ok(self.orbit_fs.get_root_node());
+        }
+
+        let components: Vec<&str> = path.split('/').collect();
+
+        // Start from root
+        let mut current_node = self.orbit_fs.get_root_node();
+
+        // Traverse each path component
+        for component in components {
+            // Current node must be a directory
+            if !current_node.is_directory() {
+                return Err(format!("Not a directory: {}", path));
+            }
+
+            // Get the directory contents
+            let runtime_data = self.orbit_fs.runtime_data.read();
+            let directory = runtime_data
+                .directories
+                .get(&current_node.content_hash)
+                .ok_or_else(|| format!("Path not found: {}", path))?;
+
+            // Find the entry with matching name
+            let entry = directory
+                .entry_by_name(component)
+                .ok_or_else(|| format!("Path not found: {}", path))?;
+
+            // Get the node for this entry
+            current_node = runtime_data
+                .inodes
+                .get(entry.inode_number.0 as usize)
+                .copied()
+                .ok_or_else(|| format!("Path not found: {}", path))?;
+        }
+
+        Ok(current_node)
+    }
+
+    /// Get a filesystem node by its path
+    /// Recursively traverses from root following path components
+    pub fn get_node_by_path(&self, path: &str) -> Result<FsNode, String> {
+        let runtime_node = self.traverse_to_node(path)?;
+        Ok(runtime_node.into())
+    }
+
+    /// List entries in a directory given by path
+    pub fn list_directory(&self, path: &str) -> Result<Vec<(String, FsNode)>, String> {
+        let dir_node = self.traverse_to_node(path)?;
+
+        // Verify it's a directory
+        if !dir_node.is_directory() {
+            return Err(format!("Not a directory: {}", path));
+        }
+
+        // Get directory contents
+        let runtime_data = self.orbit_fs.runtime_data.read();
+        let directory = runtime_data
+            .directories
+            .get(&dir_node.content_hash)
+            .ok_or_else(|| format!("Not a directory: {}", path))?;
+
+        // Convert entries to the result format
+        let entries: Vec<(String, FsNode)> = directory
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                runtime_data
+                    .inodes
+                    .get(entry.inode_number.0 as usize)
+                    .map(|node| (entry.name.clone(), (*node).into()))
+            })
+            .collect();
+
+        Ok(entries)
     }
 }

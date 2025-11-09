@@ -19,6 +19,18 @@
             android:enabled="true"
             android:exported="true"></service>
 
+        <provider
+            android:name=".OrbitDocumentProvider"
+            android:authorities="de.maufl.orbit.documents"
+            android:enabled="true"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

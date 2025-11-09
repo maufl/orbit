@@ -3,7 +3,7 @@
 
 use log::info;
 use orbit::network::IrohNetworkCommunication;
-use orbit::OrbitFs;
+use orbit::{FileType, FsNode, OrbitFs, OrbitFsWrapper};
 use std::sync::Arc;
 
 uniffi::setup_scaffolding!();
@@ -21,8 +21,7 @@ pub struct Config {
 /// A simplified Orbit client for use from foreign language bindings
 #[derive(uniffi::Object)]
 pub struct OrbitClient {
-    #[allow(dead_code)]
-    orbit_fs: OrbitFs,
+    fs_wrapper: OrbitFsWrapper,
     config: Config,
     #[allow(dead_code)]
     runtime: tokio::runtime::Runtime,
@@ -35,10 +34,6 @@ impl OrbitClient {
     /// This initializes the filesystem with network communication enabled.
     /// The data directory will be created if it doesn't exist.
     /// A secret key will be generated and persisted if one doesn't exist.
-    ///
-    /// # Arguments
-    /// * `data_dir` - Directory to store filesystem data
-    /// * `peer_node_ids` - Optional list of peer node IDs to connect to (hex format)
     #[uniffi::constructor]
     pub fn new(config: Config) -> Result<Self, OrbitError> {
         // Initialize Android logger
@@ -104,8 +99,10 @@ impl OrbitClient {
             error_message: format!("Failed to initialize Orbit: {}", e),
         })?;
 
+        let fs_wrapper = OrbitFsWrapper::new(orbit_fs);
+
         Ok(OrbitClient {
-            orbit_fs,
+            fs_wrapper,
             config: final_config,
             runtime,
         })
@@ -114,6 +111,75 @@ impl OrbitClient {
     pub fn get_config(&self) -> Config {
         self.config.clone()
     }
+
+    /// Get a filesystem node by its path
+    /// Recursively traverses from root following path components
+    pub fn get_node_by_path(&self, path: String) -> Result<FsNodeInfo, OrbitError> {
+        let node = self
+            .fs_wrapper
+            .get_node_by_path(&path)
+            .map_err(|e| OrbitError::PathNotFound { path: e })?;
+        Ok(FsNodeInfo::from_fs_node(&node))
+    }
+
+    /// List entries in a directory given by path
+    pub fn list_directory(&self, path: String) -> Result<Vec<DirectoryEntryInfo>, OrbitError> {
+        let entries = self
+            .fs_wrapper
+            .list_directory(&path)
+            .map_err(|e| OrbitError::PathNotFound { path: e })?;
+
+        let result = entries
+            .into_iter()
+            .map(|(name, node)| DirectoryEntryInfo {
+                name,
+                kind: match node.kind {
+                    FileType::Directory => FileKind::Directory,
+                    FileType::RegularFile => FileKind::RegularFile,
+                    FileType::Symlink => FileKind::Symlink,
+                },
+                size: node.size,
+            })
+            .collect();
+
+        Ok(result)
+    }
+}
+
+/// Information about a filesystem node
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FsNodeInfo {
+    pub size: u64,
+    pub kind: FileKind,
+}
+
+impl FsNodeInfo {
+    fn from_fs_node(node: &FsNode) -> Self {
+        FsNodeInfo {
+            size: node.size,
+            kind: match node.kind {
+                FileType::Directory => FileKind::Directory,
+                FileType::RegularFile => FileKind::RegularFile,
+                FileType::Symlink => FileKind::Symlink,
+            },
+        }
+    }
+}
+
+/// File type enumeration for UniFFI
+#[derive(uniffi::Enum, Clone, Debug, PartialEq)]
+pub enum FileKind {
+    Directory,
+    RegularFile,
+    Symlink,
+}
+
+/// Information about a directory entry
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct DirectoryEntryInfo {
+    pub name: String,
+    pub kind: FileKind,
+    pub size: u64,
 }
 
 /// Errors that can occur in Orbit operations
@@ -122,8 +188,14 @@ pub enum OrbitError {
     #[error("IO error: {error_message}")]
     IoError { error_message: String },
 
-    #[error("Initialization error: {error_message       }")]
+    #[error("Initialization error: {error_message}")]
     InitializationError { error_message: String },
+
+    #[error("Path not found: {path}")]
+    PathNotFound { path: String },
+
+    #[error("Not a directory: {path}")]
+    NotADirectory { path: String },
 }
 
 impl From<std::io::Error> for OrbitError {
