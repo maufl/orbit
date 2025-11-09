@@ -2,19 +2,19 @@
 **Important:** Any time you make changes to the code and you are done making additional changes, run `cargo check` to see whether there are any errors. If no errors are reported run the tests to see whether they still succeed!
 
 ## Project Overview
-- **PFS**: A distributed content-addressed filesystem implemented in Rust using FUSE
+- **Orbit**: A distributed content-addressed filesystem implemented in Rust using FUSE
 - Files stored by SHA-256 hash with metadata persisted using fjall embedded database
 - Network communication using iroh for peer-to-peer connections
-- Main components: `src/lib.rs` (core), `src/config.rs` (configuration), `src/bin/orbitd.rs` (daemon), `tests/basics.rs` (integration tests)
+- Main components: `orbit/src/lib.rs` (core), `orbit/src/config.rs` (configuration), `orbit/src/bin/orbitd.rs` (daemon), `orbit/tests/basics.rs` (integration tests)
 
 ## Key Architecture Decisions
-- **Pfs struct**: Uses `PfsRuntimeData` wrapped in `Arc<parking_lot::RwLock<_>>` for thread-safe runtime state
+- **OrbitFs struct**: Uses `OrbitFsRuntimeData` wrapped in `Arc<parking_lot::RwLock<_>>` for thread-safe runtime state
 - **Runtime Data**: Contains `directories`, `inodes`, and `open_files` - consolidated from separate Arc<RwLock<_>> fields
 - **Concurrency**: Uses `parking_lot::RwLock` instead of `std::sync::RwLock` for better performance
-- **Initialization**: `Pfs::initialize()` returns `Result<Pfs, Box<dyn std::error::Error>>` - fails early if metadata database can't be opened
+- **Initialization**: `OrbitFs::initialize()` returns `Result<OrbitFs, Box<dyn std::error::Error>>` - fails early if metadata database can't be opened
 - **Persistence**: Uses fjall key-value store for filesystem metadata
 - **Content Storage**: Files stored in data directory named by content hash
-- **Configuration**: Centralized in `src/config.rs` module with TOML serialization and XDG compliance
+- **Configuration**: Centralized in `orbit/src/config.rs` module with TOML serialization and XDG compliance
 
 ## Development Practices
 - **Formatting**: Always run `rustfmt` on `.rs` files after making changes
@@ -28,9 +28,9 @@
 - **FsNode Methods**: `is_directory()` method checks if node is a directory using pattern matching
 - **FsNode Creation**: Use `new_file_node_with_persistence()` helper for creating and persisting file nodes
 - **Directory Structure**: Metadata stored in `{data_dir}/metadata/`, content files in `{data_dir}/`
-- **Configuration**: 
+- **Configuration**:
   - Default mount point: `$HOME/Orbit`
-  - Default data directory: `$XDG_DATA_HOME/pfs_data` (falls back to `$HOME/.local/share/pfs_data`)
+  - Default data directory: `$XDG_DATA_HOME/orbit_data` (falls back to `$HOME/.local/share/orbit_data`)
   - Config file: `$XDG_CONFIG_HOME/orbitd.toml` (falls back to `$HOME/.config/orbitd.toml`)
   - Automatic private key generation and persistence
 - **Persistence**: All FsNodes and Directory structures automatically persisted to fjall database
@@ -59,13 +59,13 @@
 ## Advanced Architecture & Refactoring Learnings
 
 ### Trait Abstraction for Persistence
-- **Persistence Trait**: Created `Persistence` trait in `src/persistence.rs` to abstract database operations
+- **Persistence Trait**: Created `Persistence` trait in `orbit/src/persistence.rs` to abstract database operations
 - **Trait Objects**: Use `Arc<dyn Persistence>` for shared ownership of trait objects
 - **Error Standardization**: All persistence methods return `anyhow::Error` consistently
 - **Module Separation**: Moved all persistence logic into dedicated module for better organization
 
 ### Business Logic Separation
-- **Method Naming**: Created `pfs_*` methods (e.g., `pfs_getattr`, `pfs_readdir`) for core business logic
+- **Method Naming**: Business logic methods separated from FUSE trait implementation
 - **Return Types**: Business logic methods return `Result<_, libc::c_int>` for proper FUSE error handling
 - **FUSE Abstraction**: Filesystem trait implementations call business logic methods and handle protocol concerns
 - **Public vs Private**: Business logic methods can be private since they're only used internally

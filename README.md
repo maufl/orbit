@@ -1,6 +1,6 @@
-# PFS  - PFS File System
+# Orbit
 
-A content-addressed filesystem implemented in Rust using FUSE. Files are stored by their SHA-256 hash with metadata persisted using the fjall embedded database.
+A distributed content-addressed filesystem implemented in Rust using FUSE. Files are stored by their SHA-256 hash with metadata persisted using the fjall embedded database.
 
 ## Usage
 
@@ -15,7 +15,7 @@ cargo run --bin orbitd
 cargo test --test basics -- --test-threads=1
 ```
 
-The filesystem mounts at `$HOME/Orbit` with data stored in `$XDG_DATA_HOME/pfs_data` (or `$HOME/.local/share/pfs_data`).
+The filesystem mounts at `$HOME/Orbit` with data stored in `$XDG_DATA_HOME/orbit_data` (or `$HOME/.local/share/orbit_data`).
 
 ## AI disclaimer
 I was/am and skeptic, but I started using Claude Code for this and it's really helpful.
