@@ -109,6 +109,7 @@ class OrbitDocumentProvider : DocumentsProvider() {
             .add(DocumentsContract.Document.COLUMN_MIME_TYPE, if (fsNodeInfo.kind == FileKind.DIRECTORY) {
                 DocumentsContract.Document.MIME_TYPE_DIR } else { "*/*" })
             .add(DocumentsContract.Document.COLUMN_FLAGS, flags)
+            .add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, fsNodeInfo.modificationTimeMs)
         return result
     }
 
@@ -145,6 +146,7 @@ class OrbitDocumentProvider : DocumentsProvider() {
                 .add(DocumentsContract.Document.COLUMN_MIME_TYPE, if (entry.kind == FileKind.DIRECTORY) {
                     DocumentsContract.Document.MIME_TYPE_DIR } else { "*/*" })
                 .add(DocumentsContract.Document.COLUMN_FLAGS, flags)
+                .add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, entry.modificationTimeMs)
         }
         return result
     }

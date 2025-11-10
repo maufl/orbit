@@ -142,6 +142,7 @@ impl OrbitClient {
                     FileType::Symlink => FileKind::Symlink,
                 },
                 size: node.size,
+                modification_time_ms: node.modification_time.timestamp_millis(),
             })
             .collect();
 
@@ -195,6 +196,8 @@ impl OrbitClient {
 pub struct FsNodeInfo {
     pub size: u64,
     pub kind: FileKind,
+    /// Modification time in milliseconds since Unix epoch
+    pub modification_time_ms: i64,
 }
 
 impl FsNodeInfo {
@@ -206,6 +209,7 @@ impl FsNodeInfo {
                 FileType::RegularFile => FileKind::RegularFile,
                 FileType::Symlink => FileKind::Symlink,
             },
+            modification_time_ms: node.modification_time.timestamp_millis(),
         }
     }
 }
@@ -224,6 +228,8 @@ pub struct DirectoryEntryInfo {
     pub name: String,
     pub kind: FileKind,
     pub size: u64,
+    /// Modification time in milliseconds since Unix epoch
+    pub modification_time_ms: i64,
 }
 
 /// Errors that can occur in Orbit operations
