@@ -9,10 +9,13 @@ import android.database.MatrixCursor
 import android.graphics.Point
 import android.os.Bundle
 import android.os.CancellationSignal
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.DocumentsProvider
+import android.system.OsConstants
 import android.util.Log
 import android.webkit.MimeTypeMap
 import uniffi.orbit_android.FileKind
@@ -22,15 +25,14 @@ class OrbitDocumentProvider : DocumentsProvider() {
 
     companion object {
         private const val TAG = "OrbitDocumentProvider"
+        private const val AUTHORITY = "de.maufl.orbit.documents"
+
         private val DEFAULT_ROOT_PROJECTION = arrayOf(
             DocumentsContract.Root.COLUMN_ROOT_ID,
-            DocumentsContract.Root.COLUMN_MIME_TYPES,
             DocumentsContract.Root.COLUMN_FLAGS,
             DocumentsContract.Root.COLUMN_ICON,
             DocumentsContract.Root.COLUMN_TITLE,
-            DocumentsContract.Root.COLUMN_SUMMARY,
             DocumentsContract.Root.COLUMN_DOCUMENT_ID,
-            DocumentsContract.Root.COLUMN_AVAILABLE_BYTES
         )
 
         private val DEFAULT_DOCUMENT_PROJECTION = arrayOf(
@@ -72,15 +74,12 @@ class OrbitDocumentProvider : DocumentsProvider() {
         // TODO: Implement root querying
         result.newRow().apply {
             add(DocumentsContract.Root.COLUMN_ROOT_ID, "orbit-root")
-            add(DocumentsContract.Root.COLUMN_MIME_TYPES, "*/*")
             add(DocumentsContract.Root.COLUMN_FLAGS,
                 DocumentsContract.Root.FLAG_SUPPORTS_CREATE or
                 DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD)
             add(DocumentsContract.Root.COLUMN_ICON, R.mipmap.ic_launcher)
             add(DocumentsContract.Root.COLUMN_TITLE, context?.getString(R.string.app_name))
-            add(DocumentsContract.Root.COLUMN_SUMMARY, null)
             add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, "/")
-            add(DocumentsContract.Root.COLUMN_AVAILABLE_BYTES, null)
         }
 
         return result
@@ -124,6 +123,7 @@ class OrbitDocumentProvider : DocumentsProvider() {
 
         val entries = orbitService?.getService()?.getDirectoryEntries(parentId) ?: emptyList()
         for (entry in entries) {
+            Log.d(TAG, "found child entry: $entry")
             val flags = if (entry.kind == FileKind.DIRECTORY) {
                 DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
             } else {
@@ -160,17 +160,60 @@ class OrbitDocumentProvider : DocumentsProvider() {
             throw FileNotFoundException("Document ID is null")
         }
 
-        // Get the backing file path from Orbit
-        val backingFilePath = orbitService?.getService()?.getBackingFilePath(documentId)
+        val service = orbitService?.getService()
             ?: throw FileNotFoundException("Orbit service not available")
 
-        val file = java.io.File(backingFilePath)
-        if (!file.exists()) {
+        // Get the backing file path from Orbit
+        val backingFilePath = service.getBackingFilePath(documentId)
+
+        val backingFile = java.io.File(backingFilePath)
+        if (!backingFile.exists()) {
             throw FileNotFoundException("Backing file not found: $backingFilePath")
         }
 
         val accessMode = ParcelFileDescriptor.parseMode(mode)
-        return ParcelFileDescriptor.open(file, accessMode)
+        val isWriteMode = mode?.contains('w') ?: false
+        Log.d(TAG, "Acces is writable = $isWriteMode")
+        // For read-only access, return the backing file directly
+        if (!isWriteMode) {
+            return ParcelFileDescriptor.open(backingFile, accessMode)
+        }
+
+        val tempFile = java.io.File.createTempFile("orbit_", ".tmp", context?.cacheDir)
+        Log.d(TAG, "Created temp file for writing: ${tempFile.absolutePath}")
+
+        // Copy current content to temp file
+        backingFile.inputStream().use { input ->
+            tempFile.outputStream().use { output ->
+                input.copyTo(output)
+            }
+        }
+
+        // Open the temp file with write access
+        val pfd = ParcelFileDescriptor.open(tempFile, accessMode, Handler(Looper.getMainLooper())) {
+            e ->
+            Log.d(TAG, "Temp file closed, updating Orbit: $documentId")
+            try {
+                service.updateFileFrom(documentId, tempFile.absolutePath)
+                Log.d(TAG, "Successfully updated file in Orbit")
+
+                // Notify Android that the document has changed
+                val uri = DocumentsContract.buildDocumentUri(AUTHORITY, documentId)
+                context?.contentResolver?.notifyChange(uri, null)
+                Log.d(TAG, "Notified content change for: $uri")
+            } catch (ex: Exception) {
+                Log.e(TAG, "Failed to update file in Orbit: ${ex.message}", ex)
+            } finally {
+                // Clean up temp file
+                if (tempFile.exists()) {
+                    tempFile.delete()
+                    Log.d(TAG, "Deleted temp file: ${tempFile.absolutePath}")
+                }
+            }
+        }
+
+
+        return pfd
     }
 
     override fun createDocument(
@@ -181,8 +224,7 @@ class OrbitDocumentProvider : DocumentsProvider() {
         Log.d(TAG, "createDocument: parent=$parentDocumentId, mimeType=$mimeType, name=$displayName")
 
         if (displayName == null || displayName.isEmpty()) {
-            Log.e(TAG, "Display name is null or empty")
-            return null
+            throw IllegalArgumentException("Display name is required")
         }
 
         val parentPath = parentDocumentId ?: "/"
@@ -190,9 +232,18 @@ class OrbitDocumentProvider : DocumentsProvider() {
         // Create the file in Orbit
         try {
             orbitService?.getService()?.createFile(parentPath, displayName)
+        } catch (e: uniffi.orbit_android.OrbitException.FileExists) {
+            Log.w(TAG, "File already exists: $displayName")
+            throw IllegalArgumentException("File already exists: $displayName")
+        } catch (e: uniffi.orbit_android.OrbitException.PathNotFound) {
+            Log.e(TAG, "Parent directory not found: $parentPath", e)
+            throw java.io.FileNotFoundException("Parent directory not found: $parentPath")
+        } catch (e: uniffi.orbit_android.OrbitException.NotADirectory) {
+            Log.e(TAG, "Parent path is not a directory: $parentPath", e)
+            throw java.io.FileNotFoundException("Parent path is not a directory: $parentPath")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create file: ${e.message}", e)
-            return null
+            throw java.io.IOException("Failed to create file: ${e.message}")
         }
 
         // Return the new document ID (which is the full path)

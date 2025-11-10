@@ -82,4 +82,8 @@ class OrbitService : Service() {
     fun getBackingFilePath(path: String) : String {
         return orbitClient.getBackingFilePath(path)
     }
+
+    fun updateFileFrom(path: String, sourcePath: String) {
+        orbitClient.updateFileFrom(path, sourcePath)
+    }
 }

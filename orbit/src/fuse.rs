@@ -324,14 +324,20 @@ pub fn rename(
         .ok_or(libc::ENOENT)?
         .clone();
     let (_dest_fs_node, dest_directory) = orbit_fs.get_directory(newparent)?;
-    if no_replace
-        && dest_directory
-            .entries
-            .iter()
-            .any(|entry| entry.name == newname)
-    {
+    let dest_exists = dest_directory
+        .entries
+        .iter()
+        .any(|entry| entry.name == newname);
+
+    if no_replace && dest_exists {
         return Err(libc::EEXIST);
     }
+
+    // If destination exists and we're allowed to replace, remove it first
+    if !no_replace && dest_exists {
+        orbit_fs.remove_directory_entry(InodeNumber(newparent), newname)?;
+    }
+
     if parent != newparent {
         let mut runtime_data = orbit_fs.runtime_data.write();
         let fs_node = runtime_data

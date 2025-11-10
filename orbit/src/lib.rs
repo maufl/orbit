@@ -574,6 +574,12 @@ impl OrbitFs {
         new_entry: RuntimeDirectoryEntry,
     ) -> Result<(), i32> {
         let (directory_node, mut directory) = self.get_directory(inode_number.0)?;
+
+        // Check if an entry with the same name already exists
+        if directory.entry_by_name(&new_entry.name).is_some() {
+            return Err(libc::EEXIST);
+        }
+
         directory.entries.push(new_entry);
         self.update_directory(inode_number, &directory_node, directory)?;
         Ok(())
@@ -796,6 +802,8 @@ impl OrbitFsWrapper {
         parent_path: &str,
         filename: &str,
     ) -> Result<ContentHash, String> {
+        use base64::Engine;
+
         // Validate filename
         if filename.is_empty() {
             return Err("Filename cannot be empty".to_string());
@@ -824,8 +832,12 @@ impl OrbitFsWrapper {
         // Create empty file content (hash of empty data)
         let empty_content_hash = ContentHash(hmac_sha256::Hash::hash(&[]));
 
-        // Create file in the data directory
-        let file_path = format!("{}/{}", self.orbit_fs.data_dir, empty_content_hash);
+        // Create file in the data directory with base64-encoded hash
+        let file_path = format!(
+            "{}/{}",
+            self.orbit_fs.data_dir,
+            base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(empty_content_hash.0)
+        );
         std::fs::write(&file_path, &[]).map_err(|e| format!("Failed to create file: {}", e))?;
 
         // Create FsNode for the new file
@@ -843,7 +855,13 @@ impl OrbitFsWrapper {
 
         self.orbit_fs
             .add_directory_entry(parent_inode, new_entry)
-            .map_err(|e| format!("Failed to add directory entry: {}", e))?;
+            .map_err(|e| {
+                if e == libc::EEXIST {
+                    format!("File already exists: {}", filename)
+                } else {
+                    format!("Failed to add directory entry: {}", e)
+                }
+            })?;
 
         Ok(empty_content_hash)
     }
@@ -851,6 +869,8 @@ impl OrbitFsWrapper {
     /// Get the backing file path for a given Orbit file path
     /// Returns the absolute path to the content file on disk
     pub fn get_backing_file_path(&self, path: &str) -> Result<String, String> {
+        use base64::Engine;
+
         let node = self.traverse_to_node(path)?;
 
         // Only regular files have backing files
@@ -858,9 +878,91 @@ impl OrbitFsWrapper {
             return Err(format!("Path is a directory: {}", path));
         }
 
-        // Construct the backing file path from content hash
-        let backing_path = format!("{}/{}", self.orbit_fs.data_dir, node.content_hash);
+        // Construct the backing file path from content hash (base64-encoded)
+        let backing_path = format!(
+            "{}/{}",
+            self.orbit_fs.data_dir,
+            base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(node.content_hash.0)
+        );
 
         Ok(backing_path)
+    }
+
+    /// Update a file's content from a source file
+    /// Reads the source file, calculates its hash, moves it to the data directory,
+    /// and updates the filesystem metadata
+    pub fn update_file_from(&mut self, file_path: &str, source_path: &str) -> Result<(), String> {
+        use base64::Engine;
+        use std::io::Read;
+
+        // Get the current file node
+        let current_node = self.traverse_to_node(file_path)?;
+        if current_node.is_directory() {
+            return Err(format!("Path is a directory: {}", file_path));
+        }
+
+        // Read the source file to calculate hash and size
+        let mut file = std::fs::File::open(source_path)
+            .map_err(|e| format!("Failed to open source file: {}", e))?;
+
+        let mut size = 0u64;
+        let mut buf = [0u8; 1024];
+        let mut hasher = hmac_sha256::Hash::new();
+        while let Ok(n) = file.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            size += n as u64;
+        }
+        let new_content_hash = ContentHash(hasher.finalize());
+
+        // Move the source file to the data directory with base64-encoded content hash as filename
+        let dest_path = format!(
+            "{}/{}",
+            self.orbit_fs.data_dir,
+            base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(new_content_hash.0)
+        );
+        std::fs::rename(source_path, &dest_path)
+            .or_else(|_| std::fs::copy(source_path, &dest_path).map(|_| ()))
+            .map_err(|e| format!("Failed to move file: {}", e))?;
+
+        // Get the current inode number
+        let current_inode = {
+            let runtime_data = self.orbit_fs.runtime_data.read();
+            runtime_data
+                .inodes
+                .iter()
+                .position(|n| {
+                    n.content_hash == current_node.content_hash && n.kind == current_node.kind
+                })
+                .map(|idx| InodeNumber(idx as u64))
+                .ok_or_else(|| "Current inode not found".to_string())?
+        };
+
+        // Get the old node hash before creating the new one
+        let old_node_hash = current_node.calculate_hash();
+
+        // Create new FsNode with updated content
+        let new_file_node = self.orbit_fs.new_file_node_with_persistence(
+            new_content_hash,
+            size,
+            current_node.parent_inode_number,
+        );
+        let new_file_node_hash = new_file_node.calculate_hash();
+
+        // Update the directory entry first
+        if let Some(parent_inode) = current_node.parent_inode_number {
+            self.orbit_fs
+                .update_directory_entry(parent_inode, &old_node_hash, new_file_node_hash)
+                .map_err(|e| format!("Failed to update directory entry: {}", e))?;
+        } else {
+            return Err("File has no parent directory".to_string());
+        }
+
+        // Update the inode in place
+        self.orbit_fs.runtime_data.write().inodes[current_inode.0 as usize] = new_file_node;
+
+        Ok(())
     }
 }

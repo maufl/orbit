@@ -153,7 +153,19 @@ impl OrbitClient {
         self.fs_wrapper
             .write()
             .create_file(&parent_path, &filename)
-            .map_err(|e| OrbitError::PathNotFound { path: e })?;
+            .map_err(|e| {
+                if e.contains("File already exists") {
+                    OrbitError::FileExists {
+                        path: filename.clone(),
+                    }
+                } else if e.contains("not a directory") {
+                    OrbitError::NotADirectory {
+                        path: parent_path.clone(),
+                    }
+                } else {
+                    OrbitError::PathNotFound { path: e }
+                }
+            })?;
         Ok(())
     }
 
@@ -162,6 +174,18 @@ impl OrbitClient {
         self.fs_wrapper
             .read()
             .get_backing_file_path(&path)
+            .map_err(|e| OrbitError::PathNotFound { path: e })
+    }
+
+    /// Update a file's content from a source file
+    pub fn update_file_from(
+        &self,
+        file_path: String,
+        source_path: String,
+    ) -> Result<(), OrbitError> {
+        self.fs_wrapper
+            .write()
+            .update_file_from(&file_path, &source_path)
             .map_err(|e| OrbitError::PathNotFound { path: e })
     }
 }
@@ -216,6 +240,9 @@ pub enum OrbitError {
 
     #[error("Not a directory: {path}")]
     NotADirectory { path: String },
+
+    #[error("File already exists: {path}")]
+    FileExists { path: String },
 }
 
 impl From<std::io::Error> for OrbitError {
