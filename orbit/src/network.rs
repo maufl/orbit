@@ -7,6 +7,9 @@ use bytes::{BufMut, Bytes, BytesMut};
 use iroh::discovery::mdns::MdnsDiscovery;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, NodeAddr, PublicKey, SecretKey};
+use iroh::discovery::ConcurrentDiscovery;
+use iroh::discovery::dns::DnsDiscovery;
+use iroh::discovery::pkarr::PkarrPublisher;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -52,8 +55,13 @@ pub struct IrohNetworkCommunication {
 
 impl IrohNetworkCommunication {
     pub async fn build(secret_key: SecretKey) -> anyhow::Result<IrohNetworkCommunication> {
+        let discovery = ConcurrentDiscovery::from_services(vec![
+            Box::new(PkarrPublisher::n0_dns(secret_key.clone())),
+            Box::new(DnsDiscovery::n0_dns()),
+            Box::new(MdnsDiscovery::new(secret_key.public())?)
+        ]);
         let endpoint = Endpoint::builder()
-            .discovery(Box::new(MdnsDiscovery::new(secret_key.public())?))
+            .discovery(Box::new(discovery))
             .secret_key(secret_key)
             .alpns(vec![APLN.as_bytes().to_vec()])
             .bind()
