@@ -4,12 +4,11 @@ use std::time::Duration;
 use crate::{Block, BlockHash, ContentHash, Directory, FsNode, InodeNumber, OrbitFs};
 use base64::Engine;
 use bytes::{BufMut, Bytes, BytesMut};
-use iroh::discovery::mdns::MdnsDiscovery;
-use iroh::endpoint::{Connection, RecvStream, SendStream};
-use iroh::{Endpoint, NodeAddr, PublicKey, SecretKey};
-use iroh::discovery::ConcurrentDiscovery;
 use iroh::discovery::dns::DnsDiscovery;
+use iroh::discovery::mdns::MdnsDiscovery;
 use iroh::discovery::pkarr::PkarrPublisher;
+use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::{Endpoint, EndpointAddr, PublicKey, SecretKey};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -55,18 +54,15 @@ pub struct IrohNetworkCommunication {
 
 impl IrohNetworkCommunication {
     pub async fn build(secret_key: SecretKey) -> anyhow::Result<IrohNetworkCommunication> {
-        let discovery = ConcurrentDiscovery::from_services(vec![
-            Box::new(PkarrPublisher::n0_dns(secret_key.clone())),
-            Box::new(DnsDiscovery::n0_dns()),
-            Box::new(MdnsDiscovery::new(secret_key.public())?)
-        ]);
         let endpoint = Endpoint::builder()
-            .discovery(Box::new(discovery))
+            .discovery(PkarrPublisher::n0_dns())
+            .discovery(DnsDiscovery::n0_dns())
+            .discovery(MdnsDiscovery::builder())
             .secret_key(secret_key)
             .alpns(vec![APLN.as_bytes().to_vec()])
             .bind()
             .await?;
-        info!("Node ID is {}", endpoint.node_id());
+        info!("Node ID is {}", endpoint.id());
         let (content_notification_sender, _content_notification_receiver) =
             tokio::sync::broadcast::channel(10);
         let (sender, _receiver) = tokio::sync::broadcast::channel(10);
@@ -173,7 +169,7 @@ pub async fn connect_to_peer(
     let mut remote_pub_key = [0u8; 32];
     remote_pub_key.copy_from_slice(&remote_node_id);
 
-    let node_addr = NodeAddr::new(PublicKey::from_bytes(&remote_pub_key)?);
+    let node_addr = EndpointAddr::new(PublicKey::from_bytes(&remote_pub_key)?);
 
     tokio::spawn(async move {
         let Ok(conn) = endpoint.connect(node_addr, APLN.as_bytes()).await else {
@@ -195,10 +191,7 @@ pub async fn accept_connections(
 ) -> Result<(), anyhow::Error> {
     while let Some(incommig) = endpoint.accept().await {
         if let Ok(conn) = incommig.await {
-            info!(
-                "Accepted new connection from {}",
-                conn.remote_node_id().unwrap()
-            );
+            info!("Accepted new connection from {}", conn.remote_id());
             let orbit_fs_clone = orbit_fs.clone();
             let (net_sender, net_receiver) = conn.accept_bi().await?;
             let content_notifier = content_notifier.clone();
@@ -224,7 +217,7 @@ pub async fn open_connection(
     message_sender: Sender<Messages>,
     content_notifier: Sender<ContentHash>,
 ) -> Result<(), anyhow::Error> {
-    info!("Handling new connection to {}", conn.remote_node_id()?);
+    info!("Handling new connection to {}", conn.remote_id());
     let (net_sender, net_receiver) = conn.open_bi().await?;
     handle_connection(
         net_sender,

@@ -3,7 +3,6 @@ use std::{env, fs, path::PathBuf};
 use anyhow::Error;
 use iroh::SecretKey;
 use log::debug;
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -19,8 +18,7 @@ pub struct Config {
 }
 
 pub fn new_secret_key() -> SecretKey {
-    let mut rng = OsRng;
-    SecretKey::generate(&mut rng)
+    SecretKey::generate(&mut rand::rng())
 }
 
 impl Default for Config {

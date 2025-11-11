@@ -3,14 +3,14 @@ use orbit::network::APLN;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let secret = SecretKey::generate(rand::rngs::OsRng);
+    let secret = SecretKey::generate(&mut rand::rng());
     let endpoint = Endpoint::builder()
-        .discovery(Box::new(MdnsDiscovery::new(secret.public())?))
+        .discovery(MdnsDiscovery::builder())
         .secret_key(secret)
         .alpns(vec![APLN.as_bytes().to_vec()])
         .bind()
         .await?;
-    println!("Node ID is {}", endpoint.node_id());
+    println!("Node ID is {}", endpoint.id());
     while let Some(incoming) = endpoint.accept().await {
         let connection = incoming.accept()?.await?;
         let (_send_stream, mut recv_stream) = connection.accept_bi().await?;
