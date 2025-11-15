@@ -1,7 +1,7 @@
 // UniFFI bindings for Orbit - exposes a simplified API for Kotlin/Swift/Python
 // This is a separate library target that wraps the main Orbit functionality
 
-use log::info;
+use log::{info, LevelFilter};
 use orbit::network::IrohNetworkCommunication;
 use orbit::{FileType, FsNode, OrbitFs, OrbitFsWrapper};
 use parking_lot::RwLock;
@@ -74,8 +74,9 @@ impl OrbitClient {
             orbit::config::new_secret_key()
         };
         info!(
-            "The node ID is {}",
-            hex::encode(secret_key.public().as_bytes())
+            "The node ID is {} {}",
+            hex::encode(secret_key.public().as_bytes()),
+            base32::encode(base32::Alphabet::Z, secret_key.public().as_bytes())
         );
 
         // Update config with the secret key (either the one provided or newly generated)
@@ -100,6 +101,11 @@ impl OrbitClient {
             error_message: format!("Failed to initialize Orbit: {}", e),
         })?;
 
+        runtime.block_on(async {
+            // accept incoming connections
+            network_communication.accept_connections(orbit_fs.clone());
+        });
+
         let fs_wrapper = OrbitFsWrapper::new(orbit_fs);
 
         Ok(OrbitClient {
@@ -115,7 +121,7 @@ impl OrbitClient {
 
     /// Get a filesystem node by its path
     /// Recursively traverses from root following path components
-    pub fn get_node_by_path(&self, path: String) -> Result<FsNodeInfo, OrbitError> {
+pub fn get_node_by_path(&self, path: String) -> Result<FsNodeInfo, OrbitError> {
         let node = self
             .fs_wrapper
             .read()

@@ -3,6 +3,7 @@ package de.maufl.orbit
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.IBinder
 import android.util.Log
@@ -16,6 +17,7 @@ class OrbitService : Service() {
 
     lateinit private var orbitClient: OrbitClient
     private val binder = OrbitBinder()
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     companion object {
         private const val TAG = "OrbitService"
@@ -54,6 +56,10 @@ class OrbitService : Service() {
             peerNodeIds = listOf()
         )
 
+        val wifiManager = getSystemService(Context.WIFI_SERVICE) as WifiManager
+        multicastLock = wifiManager.createMulticastLock("iroh_mdns")
+        multicastLock?.acquire()
+
         // Initialize Orbit client
         orbitClient = OrbitClient(config)
 
@@ -65,6 +71,12 @@ class OrbitService : Service() {
                 Log.i(TAG, "Saved new secret key to SharedPreferences")
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        multicastLock?.release()
+        orbitClient.destroy()   
     }
 
     fun getFsNodeByPath(path: String) : FsNodeInfo {
@@ -86,4 +98,4 @@ class OrbitService : Service() {
     fun updateFileFrom(path: String, sourcePath: String) {
         orbitClient.updateFileFrom(path, sourcePath)
     }
-}
+}   

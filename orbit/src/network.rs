@@ -54,10 +54,7 @@ pub struct IrohNetworkCommunication {
 
 impl IrohNetworkCommunication {
     pub async fn build(secret_key: SecretKey) -> anyhow::Result<IrohNetworkCommunication> {
-        let endpoint = Endpoint::builder()
-            .discovery(PkarrPublisher::n0_dns())
-            .discovery(DnsDiscovery::n0_dns())
-            .discovery(MdnsDiscovery::builder())
+    let endpoint = Endpoint::builder()
             .secret_key(secret_key)
             .alpns(vec![APLN.as_bytes().to_vec()])
             .bind()
@@ -161,7 +158,6 @@ pub async fn connect_to_peer(
     sender: tokio::sync::broadcast::Sender<Messages>,
     content_notification_sender: tokio::sync::broadcast::Sender<ContentHash>,
 ) -> Result<(), anyhow::Error> {
-    info!("Connecting to peer: {}", peer_node_id);
 
     let remote_node_id = hex::decode(&peer_node_id)
         .map_err(|e| anyhow::anyhow!("Invalid hex format for node ID {}: {}", peer_node_id, e))?;
@@ -170,10 +166,19 @@ pub async fn connect_to_peer(
     remote_pub_key.copy_from_slice(&remote_node_id);
 
     let node_addr = EndpointAddr::new(PublicKey::from_bytes(&remote_pub_key)?);
+    info!("Connecting to {}", node_addr.id);
 
     tokio::spawn(async move {
-        let Ok(conn) = endpoint.connect(node_addr, APLN.as_bytes()).await else {
-            return warn!("Failed to connect to node {}", peer_node_id);
+        let conn = loop {
+            let node_addr = node_addr.clone();
+            match endpoint.connect(node_addr, APLN.as_bytes()).await {
+                Ok(conn) => break conn,
+                Err(e) => {
+                    warn!("Failed to connect to node {}: {}", peer_node_id, e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                    continue;
+                }
+            }
         };
         if let Err(e) = open_connection(conn, orbit_fs, sender, content_notification_sender).await {
             warn!("Error while handling connection to {}: {}", peer_node_id, e);

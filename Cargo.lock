@@ -2401,6 +2401,7 @@ name = "orbit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base32",
  "base64",
  "bytes",
  "chrono",
@@ -2430,6 +2431,7 @@ version = "0.1.0"
 dependencies = [
  "android_logger",
  "anyhow",
+ "base32",
  "hex",
  "log",
  "orbit",

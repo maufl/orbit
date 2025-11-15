@@ -26,6 +26,7 @@ toml = "0.8"
 clap = { version = "4.0", features = ["derive"] }
 uuid = { version = "1.17.0", features = ["v4"], optional = true }
 thiserror = "1.0"
+base32 = "0.5.1"
 
 [[bin]]
 name = "orbitd"

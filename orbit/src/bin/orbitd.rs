@@ -56,8 +56,9 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let secret_key = config.get_secret_key()?;
     info!(
-        "Node public key: {}",
-        hex::encode(secret_key.public().as_bytes())
+        "Node public key: {} {}",
+        hex::encode(secret_key.public().as_bytes()),
+        base32::encode(base32::Alphabet::Z, secret_key.public().as_bytes())
     );
     let (shutdown_sender, shutdown_receiver) = tokio::sync::broadcast::channel(1);
     let iroh_network_communication = Arc::new(IrohNetworkCommunication::build(secret_key).await?);
@@ -72,6 +73,8 @@ async fn main() -> Result<(), anyhow::Error> {
         thread::spawn(move || run_fs(orbit_fs, mount_point, shutdown_receiver));
     }
 
+    // accept incoming connections
+    iroh_network_communication.accept_connections(orbit_fs.clone());
     // Connect to all peer node IDs from config
     let peer_node_ids = config.peer_node_ids.clone();
     iroh_network_communication
