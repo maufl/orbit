@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::time::Duration;
 
-use crate::{Block, BlockHash, ContentHash, Directory, FsNode, FsNodeHash, InodeNumber, OrbitFs};
+use crate::{Block, BlockHash, ContentHash, Directory, FsNode, InodeNumber, OrbitFs};
 use async_trait::async_trait;
 use base64::Engine;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -18,14 +18,9 @@ pub const APLN: &str = "de.maufl.orbit";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Messages {
-    Hello(Block),
-    BlockChanged(Block),
-    BlockRequest(BlockHash),
-    BlockResponse(Block),
+    NotifyLatestBlock(Block),
     BlockRangeRequest((BlockHash, BlockHash)), // (start_inclusive, end_exclusive)
     BlockRangeResponse(Vec<Block>),
-    FsNodeRequest(Vec<FsNodeHash>),
-    FsNodeResponse(Vec<FsNode>),
     NewFsNodes(Vec<FsNode>),
     NewDirectories(Vec<Directory>),
     ContentRequest(Vec<ContentHash>),
@@ -44,21 +39,6 @@ pub trait NetworkCommunication: Send + Sync {
         timeout: Duration,
         callback: Box<dyn FnOnce() + Send>,
     );
-    /// Request a range of blocks from the network (start_inclusive to end_exclusive)
-    /// Returns the blocks when they become available or None on timeout
-    async fn request_blocks(
-        &self,
-        start_block: BlockHash,
-        end_block: BlockHash,
-        timeout: Duration,
-    ) -> Option<Vec<Block>>;
-    /// Request FsNodes by their hashes from the network
-    /// Returns the nodes when they become available or None on timeout
-    async fn request_fsnodes(
-        &self,
-        fs_node_hashes: Vec<FsNodeHash>,
-        timeout: Duration,
-    ) -> Option<Vec<FsNode>>;
 }
 
 /// Implementation of network communication using tokio broadcast channels
@@ -70,7 +50,6 @@ pub struct IrohNetworkCommunication {
     tokio_runtime_handle: Handle,
     content_notification_sender: Sender<ContentHash>,
     block_notification_sender: Sender<Vec<Block>>,
-    fsnode_notification_sender: Sender<Vec<FsNode>>,
 }
 
 impl IrohNetworkCommunication {
@@ -85,8 +64,6 @@ impl IrohNetworkCommunication {
             tokio::sync::broadcast::channel(10);
         let (block_notification_sender, _block_notification_receiver) =
             tokio::sync::broadcast::channel(10);
-        let (fsnode_notification_sender, _fsnode_notification_receiver) =
-            tokio::sync::broadcast::channel(10);
         let (sender, _receiver) = tokio::sync::broadcast::channel(10);
         Ok(IrohNetworkCommunication {
             message_sender: sender.clone(),
@@ -94,7 +71,6 @@ impl IrohNetworkCommunication {
             tokio_runtime_handle: tokio::runtime::Handle::current(),
             content_notification_sender,
             block_notification_sender,
-            fsnode_notification_sender,
         })
     }
 
@@ -195,8 +171,14 @@ impl IrohNetworkCommunication {
     ) -> Result<(), anyhow::Error> {
         let receiver = self.message_sender.subscribe();
         let current_block = orbit_fs.runtime_data.read().current_block.clone();
-        if let Err(e) = self.message_sender.send(Messages::Hello(current_block)) {
-            warn!("Unable to queue hello message for new connection: {}", e);
+        if let Err(e) = self
+            .message_sender
+            .send(Messages::NotifyLatestBlock(current_block))
+        {
+            warn!(
+                "Unable to queue latest block notification for new connection: {}",
+                e
+            );
         };
         let network = self.clone();
         tokio::spawn(async move {
@@ -233,64 +215,76 @@ impl IrohNetworkCommunication {
                     }
                 }
             }
-            Messages::BlockChanged(new_block) => {
-                debug!("Received a BlockChanged message");
+            Messages::NotifyLatestBlock(remote_block) => {
+                let remote_block_hash = remote_block.calculate_hash();
+                debug!(
+                    "Received NotifyLatestBlock message, remote block hash is {}",
+                    remote_block_hash
+                );
 
-                // Get the current block and calculate hashes
+                // Get the current block and calculate hash
                 let current_block = orbit_fs.runtime_data.read().current_block.clone();
                 let current_block_hash = current_block.calculate_hash();
-                let new_block_hash = new_block.calculate_hash();
 
-                // Persist the new block first so ancestry checks can load it
-                if let Err(e) = orbit_fs.persistence.persist_block(&new_block) {
-                    warn!("Unable to persist new block: {}", e);
+                // Persist the remote block first so ancestry checks can load it
+                if let Err(e) = orbit_fs.persistence.persist_block(&remote_block) {
+                    warn!("Unable to persist remote block: {}", e);
                     return;
                 }
 
-                // Check if the new block is an ancestor of our current block
+                // Check if the remote block is an ancestor of our current block
                 // If so, we already have a newer version, so we can ignore this update
-                if orbit_fs.is_block_ancestor(&new_block_hash, &current_block_hash) {
+                if orbit_fs.is_block_ancestor(&remote_block_hash, &current_block_hash) {
                     debug!(
-                        "Received block {} is an ancestor of our current block {}, ignoring",
-                        new_block_hash, current_block_hash
+                        "Remote block {} is an ancestor of our current block {}, ignoring",
+                        remote_block_hash, current_block_hash
                     );
                     return;
                 }
 
-                // Check if our current block is an ancestor of the new block
-                // If so, we can safely update to the new block
-                if !orbit_fs.is_block_ancestor(&current_block_hash, &new_block_hash) {
+                // Check if our current block is an ancestor of the remote block
+                // If not, this indicates a divergence
+                if !orbit_fs.is_block_ancestor(&current_block_hash, &remote_block_hash) {
                     warn!(
-                        "Received block {} is not a descendant of our current block {}, this indicates a divergence",
-                        new_block_hash, current_block_hash
+                        "Remote block {} is not a descendant of our current block {}, this indicates a divergence",
+                        remote_block_hash, current_block_hash
                     );
 
                     // Try to find the common ancestor
                     if let Some(common_ancestor) =
-                        orbit_fs.find_common_ancestor(&current_block_hash, &new_block_hash)
+                        orbit_fs.find_common_ancestor(&current_block_hash, &remote_block_hash)
                     {
                         info!(
                             "Found common ancestor block {} for diverged branches {} and {}",
-                            common_ancestor, current_block_hash, new_block_hash
+                            common_ancestor, current_block_hash, remote_block_hash
                         );
                         // TODO: Implement three-way merge using the common ancestor
                         // For now, we'll skip the update to avoid potential data loss
                     } else {
                         warn!(
                             "Could not find common ancestor between {} and {}, blocks may be from different filesystems",
-                            current_block_hash, new_block_hash
+                            current_block_hash, remote_block_hash
                         );
                     }
                     return;
                 }
 
-                // Our current block is an ancestor of the new block, proceed with update
+                // Our current block is an ancestor of the remote block, proceed with update
                 info!(
                     "Updating from block {} to block {}",
-                    current_block_hash, new_block_hash
+                    current_block_hash, remote_block_hash
                 );
 
-                let new_root_hash = new_block.root_node_hash;
+                // Request intermediate blocks if we're behind
+                // This ensures we have all the necessary FsNodes and Directories
+                if let Err(e) = self.message_sender.send(Messages::BlockRangeRequest((
+                    remote_block_hash,
+                    current_block_hash,
+                ))) {
+                    warn!("Failed to send block range request: {}", e);
+                }
+
+                let new_root_hash = remote_block.root_node_hash;
                 let old_root_hash = orbit_fs.get_root_node().calculate_hash();
                 if let Err(e) = orbit_fs.update_directory_recursive(
                     &old_root_hash,
@@ -303,69 +297,6 @@ impl IrohNetworkCommunication {
                         "Successfully updated to new root hash: {}",
                         orbit_fs.get_root_node().calculate_hash()
                     );
-                }
-            }
-            Messages::Hello(block) => {
-                let block_hash = block.calculate_hash();
-                debug!(
-                    "Received Hello message from peer, their block hash is {}",
-                    block_hash
-                );
-
-                let current_block = orbit_fs.runtime_data.read().current_block.clone();
-                let current_block_hash = current_block.calculate_hash();
-
-                // Persist the block if we don't have it
-                if let Err(_) = orbit_fs.persistence.load_block(&block_hash) {
-                    info!(
-                        "The remote's block {} is unknown to us, persisting it",
-                        block_hash
-                    );
-                    if let Err(e) = orbit_fs.persistence.persist_block(&block) {
-                        warn!("Unable to persist block from hello: {}", e);
-                        return;
-                    }
-
-                    // Check if the remote block is ahead of us
-                    if orbit_fs.is_block_ancestor(&current_block_hash, &block_hash) {
-                        info!(
-                            "Remote block {} is ahead of our current block {}, requesting intermediate blocks",
-                            block_hash, current_block_hash
-                        );
-                        // Request all blocks between our current block and the remote block
-                        if let Err(e) = self.message_sender.send(Messages::BlockRangeRequest((
-                            block_hash,
-                            current_block_hash,
-                        ))) {
-                            warn!("Failed to send block range request: {}", e);
-                        }
-                    } else {
-                        debug!(
-                            "Remote block {} is not ahead of us, no need to request intermediate blocks",
-                            block_hash
-                        );
-                    }
-                } else {
-                    debug!("We know this remote block!");
-                }
-            }
-            Messages::BlockRequest(block_hash) => {
-                debug!("Received BlockRequest for {}", block_hash);
-                match orbit_fs.persistence.load_block(&block_hash) {
-                    Ok(block) => {
-                        if let Err(e) = self.message_sender.send(Messages::BlockResponse(block)) {
-                            warn!("Failed to send block response: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Unable to load requested block {}: {}", block_hash, e);
-                    }
-                }
-            }
-            Messages::BlockResponse(block) => {
-                debug!("Received BlockResponse");
-                if let Err(e) = orbit_fs.persistence.persist_block(&block) {
-                    warn!("Unable to persist block from response: {}", e);
                 }
             }
             Messages::ContentRequest(requested_content) => {
@@ -467,39 +398,6 @@ impl IrohNetworkCommunication {
                     warn!("Failed to notify about received blocks: {}", e);
                 }
             }
-            Messages::FsNodeRequest(fs_node_hashes) => {
-                debug!("Received FsNodeRequest for {} nodes", fs_node_hashes.len());
-                let mut nodes = Vec::new();
-
-                for hash in fs_node_hashes {
-                    match orbit_fs.persistence.load_fs_node(&hash) {
-                        Ok(node) => nodes.push(node),
-                        Err(e) => {
-                            warn!("Unable to load requested FsNode {}: {}", hash, e);
-                        }
-                    }
-                }
-
-                debug!("Sending FsNodeResponse with {} nodes", nodes.len());
-                if let Err(e) = self.message_sender.send(Messages::FsNodeResponse(nodes)) {
-                    warn!("Failed to send FsNode response: {}", e);
-                }
-            }
-            Messages::FsNodeResponse(nodes) => {
-                debug!("Received FsNodeResponse with {} nodes", nodes.len());
-
-                // Persist all received nodes
-                for node in &nodes {
-                    if let Err(e) = orbit_fs.persistence.persist_fs_node(node) {
-                        warn!("Unable to persist FsNode from response: {}", e);
-                    }
-                }
-
-                // Notify that nodes are available
-                if let Err(e) = self.fsnode_notification_sender.send(nodes) {
-                    warn!("Failed to notify about received FsNodes: {}", e);
-                }
-            }
         }
     }
 
@@ -596,51 +494,6 @@ impl NetworkCommunication for IrohNetworkCommunication {
                 }
             }
         });
-    }
-
-    async fn request_blocks(
-        &self,
-        start_block: BlockHash,
-        end_block: BlockHash,
-        timeout: Duration,
-    ) -> Option<Vec<Block>> {
-        self.send_message(Messages::BlockRangeRequest((start_block, end_block)));
-        let mut block_notifier = self.block_notification_sender.subscribe();
-
-        let timeout_future = tokio::time::sleep(timeout);
-        tokio::pin!(timeout_future);
-
-        tokio::select! {
-            _ = &mut timeout_future => {
-                warn!("Timed out waiting for blocks from {} to {}", start_block, end_block);
-                None
-            }
-            Ok(blocks) = block_notifier.recv() => {
-                Some(blocks)
-            }
-        }
-    }
-
-    async fn request_fsnodes(
-        &self,
-        fs_node_hashes: Vec<FsNodeHash>,
-        timeout: Duration,
-    ) -> Option<Vec<FsNode>> {
-        self.send_message(Messages::FsNodeRequest(fs_node_hashes.clone()));
-        let mut fsnode_notifier = self.fsnode_notification_sender.subscribe();
-
-        let timeout_future = tokio::time::sleep(timeout);
-        tokio::pin!(timeout_future);
-
-        tokio::select! {
-            _ = &mut timeout_future => {
-                warn!("Timed out waiting for {} FsNodes", fs_node_hashes.len());
-                None
-            }
-            Ok(fsnodes) = fsnode_notifier.recv() => {
-                Some(fsnodes)
-            }
-        }
     }
 }
 

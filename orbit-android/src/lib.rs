@@ -1,7 +1,7 @@
 // UniFFI bindings for Orbit - exposes a simplified API for Kotlin/Swift/Python
 // This is a separate library target that wraps the main Orbit functionality
 
-use log::{info, LevelFilter};
+use log::info;
 use orbit::network::IrohNetworkCommunication;
 use orbit::{FileType, FsNode, OrbitFs, OrbitFsWrapper};
 use parking_lot::RwLock;

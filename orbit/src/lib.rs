@@ -792,7 +792,7 @@ impl OrbitFs {
 
         // Send the new block
         let current_block = self.runtime_data.read().current_block.clone();
-        network_comm.send_message(Messages::BlockChanged(current_block));
+        network_comm.send_message(Messages::NotifyLatestBlock(current_block));
     }
 }
 
