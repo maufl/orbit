@@ -62,6 +62,7 @@ pub trait NetworkCommunication: Send + Sync {
 }
 
 /// Implementation of network communication using tokio broadcast channels
+#[derive(Clone)]
 pub struct IrohNetworkCommunication {
     message_sender: Sender<Messages>,
     endpoint: Endpoint,
@@ -107,7 +108,7 @@ impl IrohNetworkCommunication {
 
         for peer_node_id in peer_node_ids {
             if let Err(e) = self
-                .connect_to_peer_impl(peer_node_id.clone(), orbit_fs.clone())
+                .connect_to_peer(peer_node_id.clone(), orbit_fs.clone())
                 .await
             {
                 warn!("Error connecting to peer {}: {}", peer_node_id, e)
@@ -116,29 +117,15 @@ impl IrohNetworkCommunication {
     }
 
     pub fn accept_connections(&self, orbit_fs: OrbitFs) {
-        let endpoint = self.endpoint.clone();
-        let message_sender = self.message_sender.clone();
-        let content_notification_sender = self.content_notification_sender.clone();
-        let block_notification_sender = self.block_notification_sender.clone();
-        let fsnode_notification_sender = self.fsnode_notification_sender.clone();
-
+        let network = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = Self::accept_connections_impl(
-                endpoint,
-                orbit_fs,
-                message_sender,
-                content_notification_sender,
-                block_notification_sender,
-                fsnode_notification_sender,
-            )
-            .await
-            {
+            if let Err(e) = network.accept_connections_impl(orbit_fs).await {
                 warn!("Error accepting connections: {}", e);
             }
         });
     }
 
-    async fn connect_to_peer_impl(
+    async fn connect_to_peer(
         &self,
         peer_node_id: String,
         orbit_fs: OrbitFs,
@@ -153,16 +140,11 @@ impl IrohNetworkCommunication {
         let node_addr = EndpointAddr::new(PublicKey::from_bytes(&remote_pub_key)?);
         info!("Connecting to {}", node_addr.id);
 
-        let endpoint = self.endpoint.clone();
-        let message_sender = self.message_sender.clone();
-        let content_notification_sender = self.content_notification_sender.clone();
-        let block_notification_sender = self.block_notification_sender.clone();
-        let fsnode_notification_sender = self.fsnode_notification_sender.clone();
-
+        let network = self.clone();
         tokio::spawn(async move {
             let conn = loop {
                 let node_addr = node_addr.clone();
-                match endpoint.connect(node_addr, APLN.as_bytes()).await {
+                match network.endpoint.connect(node_addr, APLN.as_bytes()).await {
                     Ok(conn) => break conn,
                     Err(e) => {
                         warn!("Failed to connect to node {}: {}", peer_node_id, e);
@@ -171,16 +153,7 @@ impl IrohNetworkCommunication {
                     }
                 }
             };
-            if let Err(e) = Self::open_connection(
-                conn,
-                orbit_fs,
-                message_sender,
-                content_notification_sender,
-                block_notification_sender,
-                fsnode_notification_sender,
-            )
-            .await
-            {
+            if let Err(e) = network.open_connection(conn, orbit_fs).await {
                 warn!("Error while handling connection to {}: {}", peer_node_id, e);
             }
         });
@@ -188,33 +161,14 @@ impl IrohNetworkCommunication {
         Ok(())
     }
 
-    async fn accept_connections_impl(
-        endpoint: Endpoint,
-        orbit_fs: OrbitFs,
-        sender: Sender<Messages>,
-        content_notifier: Sender<ContentHash>,
-        block_notifier: Sender<Vec<Block>>,
-        fsnode_notifier: Sender<Vec<FsNode>>,
-    ) -> Result<(), anyhow::Error> {
-        while let Some(incommig) = endpoint.accept().await {
+    async fn accept_connections_impl(&self, orbit_fs: OrbitFs) -> Result<(), anyhow::Error> {
+        while let Some(incommig) = self.endpoint.accept().await {
             if let Ok(conn) = incommig.await {
                 info!("Accepted new connection from {}", conn.remote_id());
                 let orbit_fs_clone = orbit_fs.clone();
                 let (net_sender, net_receiver) = conn.accept_bi().await?;
-                let content_notifier = content_notifier.clone();
-                let block_notifier = block_notifier.clone();
-                let fsnode_notifier = fsnode_notifier.clone();
-                let message_sender = sender.clone();
-                Self::handle_connection(
-                    net_sender,
-                    net_receiver,
-                    orbit_fs_clone,
-                    content_notifier,
-                    block_notifier,
-                    fsnode_notifier,
-                    message_sender,
-                )
-                .await?;
+                self.handle_connection(net_sender, net_receiver, orbit_fs_clone)
+                    .await?;
             } else {
                 warn!("Failed to accept incomming connection");
             }
@@ -223,69 +177,45 @@ impl IrohNetworkCommunication {
     }
 
     async fn open_connection(
+        &self,
         conn: Connection,
         orbit_fs: OrbitFs,
-        message_sender: Sender<Messages>,
-        content_notifier: Sender<ContentHash>,
-        block_notifier: Sender<Vec<Block>>,
-        fsnode_notifier: Sender<Vec<FsNode>>,
     ) -> Result<(), anyhow::Error> {
         info!("Handling new connection to {}", conn.remote_id());
         let (net_sender, net_receiver) = conn.open_bi().await?;
-        Self::handle_connection(
-            net_sender,
-            net_receiver,
-            orbit_fs,
-            content_notifier,
-            block_notifier,
-            fsnode_notifier,
-            message_sender,
-        )
-        .await
+        self.handle_connection(net_sender, net_receiver, orbit_fs)
+            .await
     }
 
     async fn handle_connection(
+        &self,
         net_sender: SendStream,
         net_receiver: RecvStream,
         orbit_fs: OrbitFs,
-        content_notifier: Sender<ContentHash>,
-        block_notifier: Sender<Vec<Block>>,
-        fsnode_notifier: Sender<Vec<FsNode>>,
-        message_sender: Sender<Messages>,
     ) -> Result<(), anyhow::Error> {
-        let receiver = message_sender.subscribe();
+        let receiver = self.message_sender.subscribe();
         let current_block = orbit_fs.runtime_data.read().current_block.clone();
-        if let Err(e) = message_sender.send(Messages::Hello(current_block)) {
+        if let Err(e) = self.message_sender.send(Messages::Hello(current_block)) {
             warn!("Unable to queue hello message for new connection: {}", e);
         };
+        let network = self.clone();
         tokio::spawn(async move {
-            Self::listen_for_updates(
-                net_receiver,
-                message_sender.clone(),
-                orbit_fs,
-                content_notifier,
-                block_notifier,
-                fsnode_notifier,
-            )
-            .await
-            .inspect_err(|e| warn!("Stopped listening for updates, encountered error {}", e))
+            network
+                .listen_for_updates(net_receiver, orbit_fs)
+                .await
+                .inspect_err(|e| warn!("Stopped listening for updates, encountered error {}", e))
         });
+        let network = self.clone();
         tokio::spawn(async move {
-            Self::forward_messages(net_sender, receiver)
+            network
+                .forward_messages(net_sender, receiver)
                 .await
                 .inspect_err(|e| warn!("Stopped sending updated, encountered error{}", e))
         });
         Ok(())
     }
 
-    fn process_received_message(
-        msg: Messages,
-        orbit_fs: &mut OrbitFs,
-        message_sender: &Sender<Messages>,
-        content_notifier: &Sender<ContentHash>,
-        block_notifier: &Sender<Vec<Block>>,
-        fsnode_notifier: &Sender<Vec<FsNode>>,
-    ) {
+    fn process_received_message(&self, msg: Messages, orbit_fs: &mut OrbitFs) {
         match msg {
             Messages::NewDirectories(dirs) => {
                 debug!("Received a NewDirectories message");
@@ -403,7 +333,7 @@ impl IrohNetworkCommunication {
                             block_hash, current_block_hash
                         );
                         // Request all blocks between our current block and the remote block
-                        if let Err(e) = message_sender.send(Messages::BlockRangeRequest((
+                        if let Err(e) = self.message_sender.send(Messages::BlockRangeRequest((
                             block_hash,
                             current_block_hash,
                         ))) {
@@ -423,7 +353,7 @@ impl IrohNetworkCommunication {
                 debug!("Received BlockRequest for {}", block_hash);
                 match orbit_fs.persistence.load_block(&block_hash) {
                     Ok(block) => {
-                        if let Err(e) = message_sender.send(Messages::BlockResponse(block)) {
+                        if let Err(e) = self.message_sender.send(Messages::BlockResponse(block)) {
                             warn!("Failed to send block response: {}", e);
                         }
                     }
@@ -453,7 +383,7 @@ impl IrohNetworkCommunication {
                         continue;
                     };
                     debug!("Replying with content response");
-                    if let Err(e) = message_sender.send(Messages::ContentResponse((
+                    if let Err(e) = self.message_sender.send(Messages::ContentResponse((
                         content_hash,
                         buf.into_inner().freeze(),
                     ))) {
@@ -471,7 +401,7 @@ impl IrohNetworkCommunication {
                         content_hash, new_file_path, e
                     );
                 } else {
-                    if let Err(e) = content_notifier.send(content_hash) {
+                    if let Err(e) = self.content_notification_sender.send(content_hash) {
                         warn!("Failed to notify about new content: {}", e)
                     }
                 };
@@ -515,7 +445,10 @@ impl IrohNetworkCommunication {
                 }
 
                 debug!("Sending BlockRangeResponse with {} blocks", blocks.len());
-                if let Err(e) = message_sender.send(Messages::BlockRangeResponse(blocks)) {
+                if let Err(e) = self
+                    .message_sender
+                    .send(Messages::BlockRangeResponse(blocks))
+                {
                     warn!("Failed to send block range response: {}", e);
                 }
             }
@@ -530,7 +463,7 @@ impl IrohNetworkCommunication {
                 }
 
                 // Notify that blocks are available
-                if let Err(e) = block_notifier.send(blocks) {
+                if let Err(e) = self.block_notification_sender.send(blocks) {
                     warn!("Failed to notify about received blocks: {}", e);
                 }
             }
@@ -548,7 +481,7 @@ impl IrohNetworkCommunication {
                 }
 
                 debug!("Sending FsNodeResponse with {} nodes", nodes.len());
-                if let Err(e) = message_sender.send(Messages::FsNodeResponse(nodes)) {
+                if let Err(e) = self.message_sender.send(Messages::FsNodeResponse(nodes)) {
                     warn!("Failed to send FsNode response: {}", e);
                 }
             }
@@ -563,7 +496,7 @@ impl IrohNetworkCommunication {
                 }
 
                 // Notify that nodes are available
-                if let Err(e) = fsnode_notifier.send(nodes) {
+                if let Err(e) = self.fsnode_notification_sender.send(nodes) {
                     warn!("Failed to notify about received FsNodes: {}", e);
                 }
             }
@@ -571,12 +504,9 @@ impl IrohNetworkCommunication {
     }
 
     async fn listen_for_updates(
+        &self,
         mut net_receiver: RecvStream,
-        message_sender: Sender<Messages>,
         mut orbit_fs: OrbitFs,
-        content_notifier: Sender<ContentHash>,
-        block_notifier: Sender<Vec<Block>>,
-        fsnode_notifier: Sender<Vec<FsNode>>,
     ) -> Result<(), anyhow::Error> {
         use bytes::Buf;
 
@@ -602,14 +532,7 @@ impl IrohNetworkCommunication {
                         current_buffer = reader.into_inner();
 
                         // Process the message using the extracted function
-                        Self::process_received_message(
-                            msg,
-                            &mut orbit_fs,
-                            &message_sender,
-                            &content_notifier,
-                            &block_notifier,
-                            &fsnode_notifier,
-                        );
+                        self.process_received_message(msg, &mut orbit_fs);
                     }
                     Err(_) => {
                         // Deserialization failed - rollback the buffer and stop trying
@@ -626,6 +549,7 @@ impl IrohNetworkCommunication {
     }
 
     async fn forward_messages(
+        &self,
         mut net_sender: SendStream,
         mut receiver: Receiver<Messages>,
     ) -> Result<(), anyhow::Error> {
