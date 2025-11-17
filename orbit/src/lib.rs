@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, fmt::Display, fs::File, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt::Display,
+    fs::File,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use network::{Messages, NetworkCommunication};
 use parking_lot::RwLock;
@@ -51,7 +57,7 @@ impl std::fmt::Debug for FsNodeHash {
 #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
 pub struct InodeNumber(pub u64);
 
-#[derive(Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy)]
+#[derive(Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Clone, Copy, Hash)]
 pub struct BlockHash(pub [u8; 32]);
 
 impl Display for BlockHash {
@@ -366,6 +372,103 @@ impl OrbitFs {
 
     pub fn get_root_node(&self) -> RuntimeFsNode {
         self.runtime_data.read().inodes[1]
+    }
+
+    /// Check if one block is an ancestor of another by walking the block chain backwards
+    /// Returns true if potential_ancestor is in the chain leading to potential_descendant
+    fn is_block_ancestor(
+        &self,
+        potential_ancestor: &BlockHash,
+        potential_descendant: &BlockHash,
+    ) -> bool {
+        // If they're the same, the ancestor is not really an ancestor
+        if potential_ancestor == potential_descendant {
+            return false;
+        }
+
+        // Walk backwards from potential_descendant
+        let mut current_hash = *potential_descendant;
+
+        loop {
+            // Try to load the current block
+            let Ok(current_block) = self.persistence.load_block(&current_hash) else {
+                // Can't load block, assume not an ancestor
+                return false;
+            };
+
+            // Check the previous block hash
+            let prev_hash = current_block.previous_blocks.0;
+
+            // If we've reached the beginning (default/zero hash), not found
+            if prev_hash == BlockHash::default() {
+                return false;
+            }
+
+            // If this previous block is our potential ancestor, we found it!
+            if &prev_hash == potential_ancestor {
+                return true;
+            }
+
+            // Continue walking backwards
+            current_hash = prev_hash;
+        }
+    }
+
+    /// Find the common ancestor of two blocks by walking both chains backwards
+    /// Returns Some(BlockHash) if a common ancestor is found, None otherwise
+    fn find_common_ancestor(&self, block_a: &BlockHash, block_b: &BlockHash) -> Option<BlockHash> {
+        // If they're the same, return that block
+        if block_a == block_b {
+            return Some(*block_a);
+        }
+
+        // Build the entire chain from block_a back to the root
+        let mut chain_a = HashSet::new();
+        let mut current_hash = *block_a;
+
+        loop {
+            chain_a.insert(current_hash);
+
+            // Try to load the current block
+            let Ok(current_block) = self.persistence.load_block(&current_hash) else {
+                break;
+            };
+
+            // Get the previous block hash
+            let prev_hash = current_block.previous_blocks.0;
+
+            // If we've reached the beginning, stop
+            if prev_hash == BlockHash::default() {
+                break;
+            }
+
+            current_hash = prev_hash;
+        }
+
+        // Now walk backwards from block_b and check if each block is in chain_a
+        let mut current_hash = *block_b;
+
+        loop {
+            // Check if this block is in chain_a
+            if chain_a.contains(&current_hash) {
+                return Some(current_hash);
+            }
+
+            // Try to load the current block
+            let Ok(current_block) = self.persistence.load_block(&current_hash) else {
+                return None;
+            };
+
+            // Get the previous block hash
+            let prev_hash = current_block.previous_blocks.0;
+
+            // If we've reached the beginning, no common ancestor found
+            if prev_hash == BlockHash::default() {
+                return None;
+            }
+
+            current_hash = prev_hash;
+        }
     }
 
     pub fn update_directory_recursive(
