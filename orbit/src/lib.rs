@@ -772,26 +772,24 @@ impl OrbitFs {
         Ok((*fs_node, directory.clone()))
     }
 
-    fn sent_messages_for_changed_root(&self, old_hash: FsNodeHash) {
+    fn sent_messages_for_changed_root(&self, _old_hash: FsNodeHash) {
         let Some(ref network_comm) = self.network_communication else {
             return;
         };
-        let new_hash = self.get_root_node().calculate_hash();
         info!("Root hash changes, sending updates to peer");
-        let old_node = self
-            .persistence
-            .load_fs_node(&old_hash)
-            .expect("to find node");
-        let new_node = self
-            .persistence
-            .load_fs_node(&new_hash)
-            .expect("to find node");
-        let (updated_fs_nodes, updated_directories) = self.persistence.diff(&old_node, &new_node);
-        network_comm.send_message(Messages::NewFsNodes(updated_fs_nodes));
-        network_comm.send_message(Messages::NewDirectories(updated_directories));
-
-        // Send the new block
         let current_block = self.runtime_data.read().current_block.clone();
+        let current_block_hash = current_block.calculate_hash();
+        let previous_block_hash = current_block.previous_blocks.0;
+
+        // Use persistence diff to get the current block and all changes since the previous block
+        let history = self
+            .persistence
+            .diff(&current_block_hash, &previous_block_hash);
+
+        // Send history with current block and all changes
+        network_comm.send_message(Messages::NotifyHistory(history));
+
+        // Also send NotifyLatestBlock so peers know about the new block
         network_comm.send_message(Messages::NotifyLatestBlock(current_block));
     }
 }

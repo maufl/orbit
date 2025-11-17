@@ -1,6 +1,14 @@
 use fjall::{Config, Keyspace, PartitionHandle};
+use serde::{Deserialize, Serialize};
 
 use crate::{Block, BlockHash, ContentHash, Directory, FsNode, FsNodeHash};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HistoryData {
+    pub blocks: Vec<Block>,
+    pub fs_nodes: Vec<FsNode>,
+    pub directories: Vec<Directory>,
+}
 
 pub trait Persistence: Send + Sync {
     fn load_fs_node(&self, node_hash: &FsNodeHash) -> Result<FsNode, anyhow::Error>;
@@ -11,8 +19,7 @@ pub trait Persistence: Send + Sync {
     fn load_current_block(&self) -> Result<Block, anyhow::Error>;
     fn load_block(&self, block_hash: &BlockHash) -> Result<Block, anyhow::Error>;
     fn persist_all(&self) -> Result<(), anyhow::Error>;
-    fn diff(&self, old_root_node: &FsNode, new_root_node: &FsNode)
-    -> (Vec<FsNode>, Vec<Directory>);
+    fn diff(&self, start_block_hash: &BlockHash, end_block_hash: &BlockHash) -> HistoryData;
 }
 
 pub struct OrbitFsPersitence {
@@ -121,20 +128,63 @@ impl Persistence for OrbitFsPersitence {
         Ok(())
     }
 
-    fn diff(
-        &self,
-        old_root_node: &FsNode,
-        new_root_node: &FsNode,
-    ) -> (Vec<FsNode>, Vec<Directory>) {
+    fn diff(&self, start_block_hash: &BlockHash, end_block_hash: &BlockHash) -> HistoryData {
+        let mut blocks = Vec::new();
         let mut fs_nodes = Vec::new();
         let mut directories = Vec::new();
-        self.diff_recursive(
-            old_root_node,
-            new_root_node,
-            &mut fs_nodes,
-            &mut directories,
-        );
-        (fs_nodes, directories)
+        let mut current_hash = *start_block_hash;
+
+        // Walk backwards from start_block until we reach end_block or hit the beginning
+        loop {
+            // If we've reached the end_block (exclusive), stop
+            if current_hash == *end_block_hash {
+                break;
+            }
+
+            // Try to load the current block
+            match self.load_block(&current_hash) {
+                Ok(block) => {
+                    let prev_hash = block.previous_blocks.0;
+
+                    // Calculate diff between this block and previous block
+                    if prev_hash != BlockHash::default() {
+                        // Load the root nodes for both blocks
+                        if let (Ok(new_node), Ok(old_node)) = (
+                            self.load_fs_node(&block.root_node_hash),
+                            self.load_block(&prev_hash).and_then(|prev_block| {
+                                self.load_fs_node(&prev_block.root_node_hash)
+                            }),
+                        ) {
+                            self.diff_recursive(
+                                &old_node,
+                                &new_node,
+                                &mut fs_nodes,
+                                &mut directories,
+                            );
+                        }
+                    }
+
+                    blocks.push(block);
+
+                    // If we've reached the beginning, stop
+                    if prev_hash == BlockHash::default() {
+                        break;
+                    }
+
+                    current_hash = prev_hash;
+                }
+                Err(_) => {
+                    // Unable to load block, stop
+                    break;
+                }
+            }
+        }
+
+        HistoryData {
+            blocks,
+            fs_nodes,
+            directories,
+        }
     }
 }
 

@@ -1,7 +1,8 @@
 use std::io::Write;
 use std::time::Duration;
 
-use crate::{Block, BlockHash, ContentHash, Directory, FsNode, InodeNumber, OrbitFs};
+use crate::persistence::HistoryData;
+use crate::{Block, BlockHash, ContentHash, InodeNumber, OrbitFs};
 use async_trait::async_trait;
 use base64::Engine;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -19,10 +20,8 @@ pub const APLN: &str = "de.maufl.orbit";
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Messages {
     NotifyLatestBlock(Block),
-    BlockRangeRequest((BlockHash, BlockHash)), // (start_inclusive, end_exclusive)
-    BlockRangeResponse(Vec<Block>),
-    NewFsNodes(Vec<FsNode>),
-    NewDirectories(Vec<Directory>),
+    HistoryRequest((BlockHash, BlockHash)), // (start_inclusive, end_exclusive)
+    NotifyHistory(HistoryData),
     ContentRequest(Vec<ContentHash>),
     ContentResponse((ContentHash, Bytes)),
 }
@@ -199,20 +198,38 @@ impl IrohNetworkCommunication {
 
     fn process_received_message(&self, msg: Messages, orbit_fs: &mut OrbitFs) {
         match msg {
-            Messages::NewDirectories(dirs) => {
-                debug!("Received a NewDirectories message");
-                for dir in dirs {
-                    if let Err(e) = orbit_fs.persistence.persist_directory(&dir) {
-                        warn!("Unable to persist directories: {}", e);
+            Messages::NotifyHistory(history) => {
+                debug!(
+                    "Received NotifyHistory with {} blocks, {} fs_nodes, {} directories",
+                    history.blocks.len(),
+                    history.fs_nodes.len(),
+                    history.directories.len()
+                );
+
+                // Persist all directories
+                for dir in &history.directories {
+                    if let Err(e) = orbit_fs.persistence.persist_directory(dir) {
+                        warn!("Unable to persist directory: {}", e);
                     }
                 }
-            }
-            Messages::NewFsNodes(nodes) => {
-                debug!("Received a NewFsNodes message");
-                for node in nodes {
-                    if let Err(e) = orbit_fs.persistence.persist_fs_node(&node) {
+
+                // Persist all fs nodes
+                for node in &history.fs_nodes {
+                    if let Err(e) = orbit_fs.persistence.persist_fs_node(node) {
                         warn!("Unable to persist FS node: {}", e);
                     }
+                }
+
+                // Persist all blocks
+                for block in &history.blocks {
+                    if let Err(e) = orbit_fs.persistence.persist_block(block) {
+                        warn!("Unable to persist block: {}", e);
+                    }
+                }
+
+                // Notify that blocks are available
+                if let Err(e) = self.block_notification_sender.send(history.blocks) {
+                    warn!("Failed to notify about received blocks: {}", e);
                 }
             }
             Messages::NotifyLatestBlock(remote_block) => {
@@ -233,12 +250,29 @@ impl IrohNetworkCommunication {
                 }
 
                 // Check if the remote block is an ancestor of our current block
-                // If so, we already have a newer version, so we can ignore this update
+                // If so, the remote is behind us, send them the history they're missing
                 if orbit_fs.is_block_ancestor(&remote_block_hash, &current_block_hash) {
-                    debug!(
-                        "Remote block {} is an ancestor of our current block {}, ignoring",
+                    info!(
+                        "Remote block {} is an ancestor of our current block {}, sending them history",
                         remote_block_hash, current_block_hash
                     );
+
+                    // Calculate the diff from our current block back to their block
+                    let history = orbit_fs
+                        .persistence
+                        .diff(&current_block_hash, &remote_block_hash);
+
+                    debug!(
+                        "Sending NotifyHistory with {} blocks, {} fs_nodes, {} directories to catch up remote",
+                        history.blocks.len(),
+                        history.fs_nodes.len(),
+                        history.directories.len()
+                    );
+
+                    if let Err(e) = self.message_sender.send(Messages::NotifyHistory(history)) {
+                        warn!("Failed to send history notification: {}", e);
+                    }
+
                     return;
                 }
 
@@ -277,11 +311,11 @@ impl IrohNetworkCommunication {
 
                 // Request intermediate blocks if we're behind
                 // This ensures we have all the necessary FsNodes and Directories
-                if let Err(e) = self.message_sender.send(Messages::BlockRangeRequest((
+                if let Err(e) = self.message_sender.send(Messages::HistoryRequest((
                     remote_block_hash,
                     current_block_hash,
                 ))) {
-                    warn!("Failed to send block range request: {}", e);
+                    warn!("Failed to send history request: {}", e);
                 }
 
                 let new_root_hash = remote_block.root_node_hash;
@@ -337,65 +371,23 @@ impl IrohNetworkCommunication {
                     }
                 };
             }
-            Messages::BlockRangeRequest((start_block, end_block)) => {
+            Messages::HistoryRequest((start_block, end_block)) => {
                 debug!(
-                    "Received BlockRangeRequest from {} to {}",
+                    "Received HistoryRequest from {} to {}",
                     start_block, end_block
                 );
-                let mut blocks = Vec::new();
-                let mut current_hash = start_block;
 
-                // Walk backwards from start_block until we reach end_block or hit the beginning
-                loop {
-                    // If we've reached the end_block (exclusive), stop
-                    if current_hash == end_block {
-                        break;
-                    }
+                // Use persistence diff to get all blocks and changes
+                let history = orbit_fs.persistence.diff(&start_block, &end_block);
 
-                    // Try to load the current block
-                    match orbit_fs.persistence.load_block(&current_hash) {
-                        Ok(block) => {
-                            let prev_hash = block.previous_blocks.0;
-                            blocks.push(block);
-
-                            // If we've reached the beginning, stop
-                            if prev_hash == BlockHash::default() {
-                                break;
-                            }
-
-                            current_hash = prev_hash;
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Unable to load block {} in range request: {}",
-                                current_hash, e
-                            );
-                            break;
-                        }
-                    }
-                }
-
-                debug!("Sending BlockRangeResponse with {} blocks", blocks.len());
-                if let Err(e) = self
-                    .message_sender
-                    .send(Messages::BlockRangeResponse(blocks))
-                {
-                    warn!("Failed to send block range response: {}", e);
-                }
-            }
-            Messages::BlockRangeResponse(blocks) => {
-                debug!("Received BlockRangeResponse with {} blocks", blocks.len());
-
-                // Persist all received blocks
-                for block in &blocks {
-                    if let Err(e) = orbit_fs.persistence.persist_block(block) {
-                        warn!("Unable to persist block from range response: {}", e);
-                    }
-                }
-
-                // Notify that blocks are available
-                if let Err(e) = self.block_notification_sender.send(blocks) {
-                    warn!("Failed to notify about received blocks: {}", e);
+                debug!(
+                    "Sending NotifyHistory with {} blocks, {} fs_nodes, {} directories",
+                    history.blocks.len(),
+                    history.fs_nodes.len(),
+                    history.directories.len()
+                );
+                if let Err(e) = self.message_sender.send(Messages::NotifyHistory(history)) {
+                    warn!("Failed to send history notification: {}", e);
                 }
             }
         }
