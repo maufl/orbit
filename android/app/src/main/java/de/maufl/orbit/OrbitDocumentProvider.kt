@@ -79,7 +79,7 @@ class OrbitDocumentProvider : DocumentsProvider() {
             add(DocumentsContract.Root.COLUMN_FLAGS,
                 DocumentsContract.Root.FLAG_SUPPORTS_CREATE or
                 DocumentsContract.Root.FLAG_SUPPORTS_IS_CHILD)
-            add(DocumentsContract.Root.COLUMN_ICON, R.mipmap.ic_launcher)
+            add(DocumentsContract.Root.COLUMN_ICON, R.drawable.orbit)
             add(DocumentsContract.Root.COLUMN_TITLE, context?.getString(R.string.app_name))
             add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, "/")
         }
