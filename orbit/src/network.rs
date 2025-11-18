@@ -29,8 +29,8 @@ pub enum Messages {
 /// Trait for network communication capabilities
 #[async_trait]
 pub trait NetworkCommunication: Send + Sync {
-    /// Send a message over the network
-    fn send_message(&self, message: Messages);
+    // Notify peers about changes to FS
+    fn notify_latest_block(&self, history_data: HistoryData, block: Block);
     /// Request a file and execute a callback when it becomes available
     fn request_file_with_callback(
         &self,
@@ -454,8 +454,11 @@ impl IrohNetworkCommunication {
 
 #[async_trait]
 impl NetworkCommunication for IrohNetworkCommunication {
-    fn send_message(&self, message: Messages) {
-        if let Err(e) = self.message_sender.send(message) {
+    fn notify_latest_block(&self, history_data: HistoryData, block: Block) {
+        if let Err(e) = self.message_sender.send(Messages::NotifyHistory(history_data)) {
+            return warn!("Failed to send network message: {}", e);
+        }
+        if let Err(e) = self.message_sender.send(Messages::NotifyLatestBlock(block)) {
             warn!("Failed to send network message: {}", e);
         }
     }
@@ -466,7 +469,9 @@ impl NetworkCommunication for IrohNetworkCommunication {
         timeout: Duration,
         callback: Box<dyn FnOnce() + Send>,
     ) {
-        self.send_message(Messages::ContentRequest(vec![content_hash.clone()]));
+        if let Err(e) = self.message_sender.send(Messages::ContentRequest(vec![content_hash.clone()])) {
+            warn!("Failed to send network message: {}", e);
+        }
         let mut content_notifier = self.content_notification_sender.subscribe();
         self.tokio_runtime_handle.spawn(async move {
             let timeout = tokio::time::sleep(timeout);

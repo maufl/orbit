@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use network::{Messages, NetworkCommunication};
+use network::{NetworkCommunication};
 use parking_lot::RwLock;
 
 use chrono::{DateTime, Utc};
@@ -785,12 +785,7 @@ impl OrbitFs {
         let history = self
             .persistence
             .diff(&current_block_hash, &previous_block_hash);
-
-        // Send history with current block and all changes
-        network_comm.send_message(Messages::NotifyHistory(history));
-
-        // Also send NotifyLatestBlock so peers know about the new block
-        network_comm.send_message(Messages::NotifyLatestBlock(current_block));
+        network_comm.notify_latest_block(history, current_block);
     }
 }
 
