@@ -2,7 +2,7 @@ use std::io::Write;
 use std::time::Duration;
 
 use crate::persistence::HistoryData;
-use crate::{Block, BlockHash, ContentHash, InodeNumber, OrbitFs};
+use crate::{Block, BlockHash, ContentHash, OrbitFs};
 use async_trait::async_trait;
 use base64::Engine;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -344,17 +344,11 @@ impl IrohNetworkCommunication {
                     warn!("Failed to send history request: {}", e);
                 }
 
-                let new_root_hash = remote_block.root_node_hash;
-                let old_root_hash = orbit_fs.get_root_node().calculate_hash();
-                if let Err(e) = orbit_fs.update_directory_recursive(
-                    &old_root_hash,
-                    &new_root_hash,
-                    InodeNumber(1),
-                ) {
-                    error!("Unable to update root hash: {}", e);
+                if let Err(e) = orbit_fs.update_fs_root(current_block, remote_block) {
+                    error!("Unable to update fs root: {}", e);
                 } else {
                     info!(
-                        "Successfully updated to new root hash: {}",
+                        "Successfully updated to new fs root: {}",
                         orbit_fs.get_root_node().calculate_hash()
                     );
                 }
@@ -428,7 +422,6 @@ impl IrohNetworkCommunication {
 
         let mut buffer = BytesMut::new();
         while let Some(chunk) = net_receiver.read_chunk(15_000, true).await? {
-            debug!("Received chunk");
             // Add the new chunk to our buffer
             let mut writer = buffer.writer();
             writer.write_all(&chunk.bytes)?;

@@ -21,6 +21,7 @@ import android.webkit.MimeTypeMap
 import uniffi.orbit_android.FileKind
 import uniffi.orbit_android.FileRequestCallback
 import uniffi.orbit_android.FileRequestResult
+import uniffi.orbit_android.RootChangeCallback
 import java.io.FileNotFoundException
 
 class OrbitDocumentProvider : DocumentsProvider() {
@@ -52,6 +53,17 @@ class OrbitDocumentProvider : DocumentsProvider() {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             Log.d(TAG, "Service connected")
             orbitService = service as? OrbitService.OrbitBinder
+
+            // Register callback to be notified when filesystem root changes
+            orbitService?.getService()?.registerRootChangeCallback(object : RootChangeCallback {
+                override fun onRootChanged() {
+                    Log.d(TAG, "Filesystem root changed, notifying content resolver")
+                    // Notify that the children of the root document have changed
+                    // This tells Android to refresh the file list
+                    val childrenUri = DocumentsContract.buildChildDocumentsUri(AUTHORITY, "/")
+                    context?.contentResolver?.notifyChange(childrenUri, null)
+                }
+            })
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -84,6 +96,10 @@ class OrbitDocumentProvider : DocumentsProvider() {
             add(DocumentsContract.Root.COLUMN_DOCUMENT_ID, "/")
         }
 
+        result.setNotificationUri(
+            context?.contentResolver,
+            DocumentsContract.buildRootsUri(AUTHORITY)
+        )
         return result
     }
 
@@ -114,6 +130,11 @@ class OrbitDocumentProvider : DocumentsProvider() {
                 DocumentsContract.Document.MIME_TYPE_DIR } else { getMimeType(filename) })
             .add(DocumentsContract.Document.COLUMN_FLAGS, flags)
             .add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, fsNodeInfo.modificationTimeMs)
+
+        result.setNotificationUri(
+            context?.contentResolver,
+            DocumentsContract.buildDocumentUri(AUTHORITY, documentId)
+        )
         return result
     }
 
@@ -152,6 +173,11 @@ class OrbitDocumentProvider : DocumentsProvider() {
                 .add(DocumentsContract.Document.COLUMN_FLAGS, flags)
                 .add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, entry.modificationTimeMs)
         }
+
+        result.setNotificationUri(
+            context?.contentResolver,
+            DocumentsContract.buildChildDocumentsUri(AUTHORITY, parentId)
+        )
         return result
     }
 

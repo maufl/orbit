@@ -329,6 +329,7 @@ pub struct OrbitFs {
     pub data_dir: String,
     pub persistence: Arc<dyn Persistence>,
     network_communication: Option<Arc<dyn NetworkCommunication>>,
+    root_change_callbacks: Arc<RwLock<Vec<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
 impl OrbitFs {
@@ -348,6 +349,7 @@ impl OrbitFs {
             })),
             persistence,
             network_communication,
+            root_change_callbacks: Arc::new(RwLock::new(Vec::new())),
         };
 
         // Try to load existing data
@@ -493,7 +495,33 @@ impl OrbitFs {
         }
     }
 
-    pub fn update_directory_recursive(
+    /// Register a callback to be called when the filesystem root changes
+    pub fn register_root_change_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        let mut callbacks = self.root_change_callbacks.write();
+        callbacks.push(callback);
+    }
+
+    pub fn update_fs_root(
+        &mut self,
+        old_block: Block,
+        new_block: Block,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.update_directory_recursive(
+            &old_block.root_node_hash,
+            &new_block.root_node_hash,
+            InodeNumber(1),
+        )?;
+
+        // Call all registered callbacks after the update
+        let callbacks = self.root_change_callbacks.read();
+        for callback in callbacks.iter() {
+            callback();
+        }
+
+        Ok(())
+    }
+
+    fn update_directory_recursive(
         &mut self,
         old_dir_hash: &FsNodeHash,
         new_dir_hash: &FsNodeHash,
@@ -1082,5 +1110,10 @@ impl OrbitFsWrapper {
         self.orbit_fs.runtime_data.write().inodes[current_inode.0 as usize] = new_file_node;
 
         Ok(())
+    }
+
+    /// Register a callback to be called when the filesystem root changes
+    pub fn register_root_change_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        self.orbit_fs.register_root_change_callback(callback);
     }
 }

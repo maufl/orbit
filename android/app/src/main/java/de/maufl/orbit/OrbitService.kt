@@ -14,6 +14,7 @@ import uniffi.orbit_android.DirectoryEntryInfo
 import uniffi.orbit_android.FsNodeInfo
 import uniffi.orbit_android.FileRequestCallback
 import uniffi.orbit_android.FileRequestResult
+import uniffi.orbit_android.RootChangeCallback
 
 class OrbitService : Service() {
 
@@ -104,4 +105,8 @@ class OrbitService : Service() {
     fun requestFile(path: String, timeoutSeconds: ULong, callback: FileRequestCallback) {
         orbitClient.requestFile(path, timeoutSeconds, callback)
     }
-}   
+
+    fun registerRootChangeCallback(callback: RootChangeCallback) {
+        orbitClient.registerRootChangeCallback(callback)
+    }
+}

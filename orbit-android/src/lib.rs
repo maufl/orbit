@@ -248,6 +248,21 @@ impl OrbitClient {
 
         Ok(())
     }
+
+    /// Register a callback to be called when the filesystem root changes
+    ///
+    /// This is useful for getting notified when files change due to network synchronization.
+    /// The callback will be invoked on a background thread whenever the filesystem root is updated.
+    ///
+    /// # Arguments
+    /// * `callback` - Callback to invoke when the root changes
+    pub fn register_root_change_callback(&self, callback: Arc<dyn RootChangeCallback>) {
+        self.fs_wrapper
+            .read()
+            .register_root_change_callback(Arc::new(move || {
+                callback.on_root_changed();
+            }));
+    }
 }
 
 /// Information about a filesystem node
@@ -305,6 +320,13 @@ pub enum FileRequestResult {
 pub trait FileRequestCallback: Send + Sync {
     /// Called when a file request completes (either success or timeout)
     fn on_complete(&self, result: FileRequestResult);
+}
+
+/// Callback trait for filesystem root change notifications
+#[uniffi::export(with_foreign)]
+pub trait RootChangeCallback: Send + Sync {
+    /// Called when the filesystem root has changed
+    fn on_root_changed(&self);
 }
 
 /// Errors that can occur in Orbit operations
