@@ -19,6 +19,8 @@ import android.system.OsConstants
 import android.util.Log
 import android.webkit.MimeTypeMap
 import uniffi.orbit_android.FileKind
+import uniffi.orbit_android.FileRequestCallback
+import uniffi.orbit_android.FileRequestResult
 import java.io.FileNotFoundException
 
 class OrbitDocumentProvider : DocumentsProvider() {
@@ -102,12 +104,14 @@ class OrbitDocumentProvider : DocumentsProvider() {
             DocumentsContract.Document.FLAG_SUPPORTS_RENAME
         }
 
+        val filename = documentId!!.split("/").last()
+
         result.newRow()
             .add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, documentId!!)
-            .add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, documentId!!.split("/").last())
+            .add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, filename)
             .add(DocumentsContract.Document.COLUMN_SIZE, fsNodeInfo.size)
             .add(DocumentsContract.Document.COLUMN_MIME_TYPE, if (fsNodeInfo.kind == FileKind.DIRECTORY) {
-                DocumentsContract.Document.MIME_TYPE_DIR } else { "*/*" })
+                DocumentsContract.Document.MIME_TYPE_DIR } else { getMimeType(filename) })
             .add(DocumentsContract.Document.COLUMN_FLAGS, flags)
             .add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, fsNodeInfo.modificationTimeMs)
         return result
@@ -144,7 +148,7 @@ class OrbitDocumentProvider : DocumentsProvider() {
                 .add(DocumentsContract.Document.COLUMN_SIZE, entry.size)
                 .add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, entry.name)
                 .add(DocumentsContract.Document.COLUMN_MIME_TYPE, if (entry.kind == FileKind.DIRECTORY) {
-                    DocumentsContract.Document.MIME_TYPE_DIR } else { "*/*" })
+                    DocumentsContract.Document.MIME_TYPE_DIR } else { getMimeType(entry.name) })
                 .add(DocumentsContract.Document.COLUMN_FLAGS, flags)
                 .add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, entry.modificationTimeMs)
         }
@@ -169,14 +173,72 @@ class OrbitDocumentProvider : DocumentsProvider() {
         val backingFilePath = service.getBackingFilePath(documentId)
 
         val backingFile = java.io.File(backingFilePath)
+        val accessMode = ParcelFileDescriptor.parseMode(mode)
+        val isWriteMode = mode?.contains('w') ?: false
+        Log.d(TAG, "Acces is writable = $isWriteMode")
+
+        // If file doesn't exist locally and we're in read mode, request it from network
+        if (!backingFile.exists() && !isWriteMode) {
+            Log.d(TAG, "Backing file not found, requesting from network: $backingFilePath")
+
+            // Create a pipe for streaming the file content
+            val pipe = ParcelFileDescriptor.createPipe()
+            val readEnd = pipe[0]
+            val writeEnd = pipe[1]
+
+            // Request file from network in background thread
+            Thread {
+                try {
+                    service.requestFile(documentId, 30u, object : FileRequestCallback {
+                        override fun onComplete(result: FileRequestResult) {
+                            try {
+                                when (result) {
+                                    FileRequestResult.SUCCESS -> {
+                                        Log.d(TAG, "File received from network, writing to pipe")
+                                        // File received, copy backing file content to pipe
+                                        val file = java.io.File(backingFilePath)
+                                        file.inputStream().use { input ->
+                                            ParcelFileDescriptor.AutoCloseOutputStream(writeEnd).use { output ->
+                                                input.copyTo(output)
+                                            }
+                                        }
+                                        Log.d(TAG, "Successfully wrote file content to pipe")
+                                    }
+                                    FileRequestResult.TIMEOUT -> {
+                                        // Timeout, close the pipe to signal error
+                                        Log.w(TAG, "Timed out waiting for file from network")
+                                        writeEnd.close()
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error handling file request result: ${e.message}", e)
+                                try {
+                                    writeEnd.close()
+                                } catch (closeException: Exception) {
+                                    Log.e(TAG, "Error closing write end: ${closeException.message}")
+                                }
+                            }
+                        }
+                    })
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error requesting file: ${e.message}", e)
+                    try {
+                        writeEnd.close()
+                    } catch (closeException: Exception) {
+                        Log.e(TAG, "Error closing write end: ${closeException.message}")
+                    }
+                }
+            }.start()
+
+            return readEnd
+        }
+
+        // If file doesn't exist and we're in write mode, we can't handle this yet
         if (!backingFile.exists()) {
             throw FileNotFoundException("Backing file not found: $backingFilePath")
         }
 
-        val accessMode = ParcelFileDescriptor.parseMode(mode)
-        val isWriteMode = mode?.contains('w') ?: false
-        Log.d(TAG, "Acces is writable = $isWriteMode")
-        // For read-only access, return the backing file directly
+        // For read-only access with existing file, return the backing file directly
         if (!isWriteMode) {
             return ParcelFileDescriptor.open(backingFile, accessMode)
         }

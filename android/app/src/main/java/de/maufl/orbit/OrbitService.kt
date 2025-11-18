@@ -12,6 +12,8 @@ import uniffi.orbit_android.OrbitClient
 import androidx.core.content.edit
 import uniffi.orbit_android.DirectoryEntryInfo
 import uniffi.orbit_android.FsNodeInfo
+import uniffi.orbit_android.FileRequestCallback
+import uniffi.orbit_android.FileRequestResult
 
 class OrbitService : Service() {
 
@@ -97,5 +99,9 @@ class OrbitService : Service() {
 
     fun updateFileFrom(path: String, sourcePath: String) {
         orbitClient.updateFileFrom(path, sourcePath)
+    }
+
+    fun requestFile(path: String, timeoutSeconds: ULong, callback: FileRequestCallback) {
+        orbitClient.requestFile(path, timeoutSeconds, callback)
     }
 }   

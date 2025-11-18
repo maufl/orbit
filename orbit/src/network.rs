@@ -31,12 +31,13 @@ pub enum Messages {
 pub trait NetworkCommunication: Send + Sync {
     // Notify peers about changes to FS
     fn notify_latest_block(&self, history_data: HistoryData, block: Block);
-    /// Request a file and execute a callback when it becomes available
+    /// Request a file and execute a callback when it becomes available or times out
+    /// The callback receives true if the file was received, false if it timed out
     fn request_file_with_callback(
         &self,
         content_hash: ContentHash,
         timeout: Duration,
-        callback: Box<dyn FnOnce() + Send>,
+        callback: Box<dyn FnOnce(bool) + Send>,
     );
 }
 
@@ -455,7 +456,10 @@ impl IrohNetworkCommunication {
 #[async_trait]
 impl NetworkCommunication for IrohNetworkCommunication {
     fn notify_latest_block(&self, history_data: HistoryData, block: Block) {
-        if let Err(e) = self.message_sender.send(Messages::NotifyHistory(history_data)) {
+        if let Err(e) = self
+            .message_sender
+            .send(Messages::NotifyHistory(history_data))
+        {
             return warn!("Failed to send network message: {}", e);
         }
         if let Err(e) = self.message_sender.send(Messages::NotifyLatestBlock(block)) {
@@ -467,24 +471,28 @@ impl NetworkCommunication for IrohNetworkCommunication {
         &self,
         content_hash: ContentHash,
         timeout: Duration,
-        callback: Box<dyn FnOnce() + Send>,
+        callback: Box<dyn FnOnce(bool) + Send>,
     ) {
-        if let Err(e) = self.message_sender.send(Messages::ContentRequest(vec![content_hash.clone()])) {
+        if let Err(e) = self
+            .message_sender
+            .send(Messages::ContentRequest(vec![content_hash.clone()]))
+        {
             warn!("Failed to send network message: {}", e);
         }
         let mut content_notifier = self.content_notification_sender.subscribe();
         self.tokio_runtime_handle.spawn(async move {
-            let timeout = tokio::time::sleep(timeout);
-            tokio::pin!(timeout);
+            let timeout_future = tokio::time::sleep(timeout);
+            tokio::pin!(timeout_future);
             loop {
                 tokio::select! {
-                    _ = &mut timeout => {
+                    _ = &mut timeout_future => {
                         warn!("Timed out waiting for file {}", content_hash);
+                        tokio::task::spawn_blocking(move || callback(false));
                         return;
                     }
                     Ok(received_content_hash) = content_notifier.recv() => {
                         if received_content_hash == content_hash {
-                            tokio::task::spawn_blocking(callback);
+                            tokio::task::spawn_blocking(move || callback(true));
                             return;
                         }
                     }

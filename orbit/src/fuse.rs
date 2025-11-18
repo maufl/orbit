@@ -467,14 +467,25 @@ impl Filesystem for OrbitFs {
                         net.request_file_with_callback(
                             content_hash,
                             Duration::from_secs(10),
-                            Box::new(move || {
-                                log::debug!("It seems like we received the file {} from a peer, try opening it again", content_hash);
-                                match open(&mut orbit_fs, _ino, _flags) {
-                                Ok(fh) => reply.opened(fh, 0),
-                                Err(error) => {
-                                    warn!("Failed to request file {} from peers", content_hash);
-                                    reply.error(error);
-                                }
+                            Box::new(move |success| {
+                                if success {
+                                    log::debug!(
+                                        "Received file {} from a peer, try opening it again",
+                                        content_hash
+                                    );
+                                    match open(&mut orbit_fs, _ino, _flags) {
+                                        Ok(fh) => reply.opened(fh, 0),
+                                        Err(error) => {
+                                            warn!(
+                                                "Failed to open file {} after receiving from peers",
+                                                content_hash
+                                            );
+                                            reply.error(error);
+                                        }
+                                    }
+                                } else {
+                                    warn!("Timed out waiting for file {} from peers", content_hash);
+                                    reply.error(libc::ETIMEDOUT);
                                 }
                             }),
                         );

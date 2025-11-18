@@ -2,10 +2,11 @@
 // This is a separate library target that wraps the main Orbit functionality
 
 use log::info;
-use orbit::network::IrohNetworkCommunication;
+use orbit::network::{IrohNetworkCommunication, NetworkCommunication};
 use orbit::{FileType, FsNode, OrbitFs, OrbitFsWrapper};
 use parking_lot::RwLock;
 use std::sync::Arc;
+use std::time::Duration;
 
 uniffi::setup_scaffolding!();
 
@@ -24,6 +25,7 @@ pub struct Config {
 pub struct OrbitClient {
     fs_wrapper: RwLock<OrbitFsWrapper>,
     config: Config,
+    network_communication: Arc<IrohNetworkCommunication>,
     #[allow(dead_code)]
     runtime: tokio::runtime::Runtime,
 }
@@ -111,6 +113,7 @@ impl OrbitClient {
         Ok(OrbitClient {
             fs_wrapper: RwLock::new(fs_wrapper),
             config: final_config,
+            network_communication,
             runtime,
         })
     }
@@ -121,7 +124,7 @@ impl OrbitClient {
 
     /// Get a filesystem node by its path
     /// Recursively traverses from root following path components
-pub fn get_node_by_path(&self, path: String) -> Result<FsNodeInfo, OrbitError> {
+    pub fn get_node_by_path(&self, path: String) -> Result<FsNodeInfo, OrbitError> {
         let node = self
             .fs_wrapper
             .read()
@@ -195,6 +198,56 @@ pub fn get_node_by_path(&self, path: String) -> Result<FsNodeInfo, OrbitError> {
             .update_file_from(&file_path, &source_path)
             .map_err(|e| OrbitError::PathNotFound { path: e })
     }
+
+    /// Request a file's content from peers
+    ///
+    /// This is useful when a file's metadata is known but the content is not yet available locally.
+    /// The callback will be invoked with the result after either:
+    /// - The file is successfully received from a peer (Success)
+    /// - The timeout expires without receiving the file (Timeout)
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the file whose content should be requested
+    /// * `timeout_seconds` - Maximum time to wait for the file (in seconds)
+    /// * `callback` - Callback to invoke when the request completes
+    pub fn request_file(
+        &self,
+        file_path: String,
+        timeout_seconds: u64,
+        callback: Arc<dyn FileRequestCallback>,
+    ) -> Result<(), OrbitError> {
+        // Get the file node to extract content hash
+        let node = self
+            .fs_wrapper
+            .read()
+            .get_node_by_path(&file_path)
+            .map_err(|e| OrbitError::PathNotFound { path: e })?;
+
+        // Only request regular files, not directories
+        if node.kind == FileType::Directory {
+            return Err(OrbitError::NotADirectory { path: file_path });
+        }
+
+        let content_hash = node.content_hash;
+        let timeout = Duration::from_secs(timeout_seconds);
+
+        // Use the NetworkCommunication trait method to request the file
+        // Wrap the UniFFI callback to convert bool to FileRequestResult
+        self.network_communication.request_file_with_callback(
+            content_hash,
+            timeout,
+            Box::new(move |success| {
+                let result = if success {
+                    FileRequestResult::Success
+                } else {
+                    FileRequestResult::Timeout
+                };
+                callback.on_complete(result);
+            }),
+        );
+
+        Ok(())
+    }
 }
 
 /// Information about a filesystem node
@@ -236,6 +289,22 @@ pub struct DirectoryEntryInfo {
     pub size: u64,
     /// Modification time in milliseconds since Unix epoch
     pub modification_time_ms: i64,
+}
+
+/// Result of a file request operation
+#[derive(uniffi::Enum, Clone, Debug)]
+pub enum FileRequestResult {
+    /// File was successfully received
+    Success,
+    /// Request timed out waiting for the file
+    Timeout,
+}
+
+/// Callback trait for file request notifications
+#[uniffi::export(with_foreign)]
+pub trait FileRequestCallback: Send + Sync {
+    /// Called when a file request completes (either success or timeout)
+    fn on_complete(&self, result: FileRequestResult);
 }
 
 /// Errors that can occur in Orbit operations
