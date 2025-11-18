@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use network::{NetworkCommunication};
+use network::NetworkCommunication;
 use parking_lot::RwLock;
 
 use chrono::{DateTime, Utc};
@@ -213,9 +213,20 @@ impl DirectoryEntry {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Default, Serialize, Deserialize, Clone)]
 pub struct RuntimeDirectory {
     pub entries: Vec<RuntimeDirectoryEntry>,
+}
+
+impl std::fmt::Debug for RuntimeDirectory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeDirectory")
+            .field(
+                "entries",
+                &format_args!("Vec<RuntimeDirectoryEntry>(len={})", self.entries.len()),
+            )
+            .finish()
+    }
 }
 
 impl RuntimeDirectory {
@@ -228,9 +239,20 @@ impl RuntimeDirectory {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Default, Serialize, Deserialize, Clone)]
 pub struct Directory {
     pub entries: Vec<DirectoryEntry>,
+}
+
+impl std::fmt::Debug for Directory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Directory")
+            .field(
+                "entries",
+                &format_args!("Vec<DirectoryEntry>(len={})", self.entries.len()),
+            )
+            .finish()
+    }
 }
 
 impl Directory {

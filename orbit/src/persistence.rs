@@ -3,11 +3,30 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Block, BlockHash, ContentHash, Directory, FsNode, FsNodeHash};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct HistoryData {
     pub blocks: Vec<Block>,
     pub fs_nodes: Vec<FsNode>,
     pub directories: Vec<Directory>,
+}
+
+impl std::fmt::Debug for HistoryData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HistoryData")
+            .field(
+                "blocks",
+                &format_args!("Vec<Block>(len={})", self.blocks.len()),
+            )
+            .field(
+                "fs_nodes",
+                &format_args!("Vec<FsNode>(len={})", self.fs_nodes.len()),
+            )
+            .field(
+                "directories",
+                &format_args!("Vec<Directory>(len={})", self.directories.len()),
+            )
+            .finish()
+    }
 }
 
 pub trait Persistence: Send + Sync {

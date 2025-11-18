@@ -17,13 +17,38 @@ use tokio::{
 
 pub const APLN: &str = "de.maufl.orbit";
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum Messages {
     NotifyLatestBlock(Block),
     HistoryRequest((BlockHash, BlockHash)), // (start_inclusive, end_exclusive)
     NotifyHistory(HistoryData),
     ContentRequest(Vec<ContentHash>),
     ContentResponse((ContentHash, Bytes)),
+}
+
+impl std::fmt::Debug for Messages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Messages::NotifyLatestBlock(block) => {
+                f.debug_tuple("NotifyLatestBlock").field(block).finish()
+            }
+            Messages::HistoryRequest((start, end)) => f
+                .debug_tuple("HistoryRequest")
+                .field(&(start, end))
+                .finish(),
+            Messages::NotifyHistory(history) => {
+                f.debug_tuple("NotifyHistory").field(history).finish()
+            }
+            Messages::ContentRequest(hashes) => f
+                .debug_tuple("ContentRequest")
+                .field(&format_args!("Vec<ContentHash>(len={})", hashes.len()))
+                .finish(),
+            Messages::ContentResponse((hash, bytes)) => f
+                .debug_tuple("ContentResponse")
+                .field(&(hash, format_args!("Bytes(len={})", bytes.len())))
+                .finish(),
+        }
+    }
 }
 
 /// Trait for network communication capabilities
