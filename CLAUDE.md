@@ -23,6 +23,7 @@
 - **Persistence Testing**: `test_persistence_infrastructure` verifies full file/directory restoration across filesystem restarts
 - **Error Handling**: Use `anyhow::Error` for better error handling, database initialization failures cause early failure
 - **Code Quality**: Prefer helper functions over duplicated logic, extract common patterns into reusable methods
+- **TODO Tracking**: See `TODO.md` for future implementation ideas. Add/remove items as features are implemented or discussed.
 
 ## Important Implementation Details
 - **FsNode Methods**: `is_directory()` method checks if node is a directory using pattern matching
