@@ -7,6 +7,7 @@ import android.content.ServiceConnection
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.graphics.Point
+import android.media.ThumbnailUtils
 import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.Handler
@@ -17,6 +18,7 @@ import android.provider.DocumentsContract
 import android.provider.DocumentsProvider
 import android.system.OsConstants
 import android.util.Log
+import android.util.Size
 import android.webkit.MimeTypeMap
 import uniffi.orbit_android.FileKind
 import uniffi.orbit_android.FileRequestCallback
@@ -112,7 +114,14 @@ class OrbitDocumentProvider : DocumentsProvider() {
             return result
         }
 
-        val flags = if (fsNodeInfo.kind == FileKind.DIRECTORY) {
+        val filename = documentId!!.split("/").last()
+        val mimeType = if (fsNodeInfo.kind == FileKind.DIRECTORY) {
+            DocumentsContract.Document.MIME_TYPE_DIR
+        } else {
+            getMimeType(filename)
+        }
+
+        var flags = if (fsNodeInfo.kind == FileKind.DIRECTORY) {
             DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
         } else {
             DocumentsContract.Document.FLAG_SUPPORTS_WRITE or
@@ -120,14 +129,20 @@ class OrbitDocumentProvider : DocumentsProvider() {
             DocumentsContract.Document.FLAG_SUPPORTS_RENAME
         }
 
-        val filename = documentId!!.split("/").last()
+        // Add thumbnail support flag if file is available locally and supports thumbnails
+        if (fsNodeInfo.kind != FileKind.DIRECTORY && supportsThumbnails(mimeType)) {
+            val service = orbitService?.getService()
+            val backingFilePath = service?.getBackingFilePath(documentId)
+            if (backingFilePath != null && java.io.File(backingFilePath).exists()) {
+                flags = flags or DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL
+            }
+        }
 
         result.newRow()
             .add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, documentId!!)
             .add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, filename)
             .add(DocumentsContract.Document.COLUMN_SIZE, fsNodeInfo.size)
-            .add(DocumentsContract.Document.COLUMN_MIME_TYPE, if (fsNodeInfo.kind == FileKind.DIRECTORY) {
-                DocumentsContract.Document.MIME_TYPE_DIR } else { getMimeType(filename) })
+            .add(DocumentsContract.Document.COLUMN_MIME_TYPE, mimeType)
             .add(DocumentsContract.Document.COLUMN_FLAGS, flags)
             .add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, fsNodeInfo.modificationTimeMs)
 
@@ -147,16 +162,10 @@ class OrbitDocumentProvider : DocumentsProvider() {
         val result = MatrixCursor(projection ?: DEFAULT_DOCUMENT_PROJECTION)
         val parentId = parentDocumentId ?: "/"
 
-        val entries = orbitService?.getService()?.getDirectoryEntries(parentId) ?: emptyList()
+        val service = orbitService?.getService()
+        val entries = service?.getDirectoryEntries(parentId) ?: emptyList()
         for (entry in entries) {
             Log.d(TAG, "found child entry: $entry")
-            val flags = if (entry.kind == FileKind.DIRECTORY) {
-                DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
-            } else {
-                DocumentsContract.Document.FLAG_SUPPORTS_WRITE or
-                DocumentsContract.Document.FLAG_SUPPORTS_DELETE or
-                DocumentsContract.Document.FLAG_SUPPORTS_RENAME
-            }
 
             val documentId = if (parentId == "/") {
                 "/${entry.name}"
@@ -164,12 +173,33 @@ class OrbitDocumentProvider : DocumentsProvider() {
                 "$parentId/${entry.name}"
             }
 
+            val mimeType = if (entry.kind == FileKind.DIRECTORY) {
+                DocumentsContract.Document.MIME_TYPE_DIR
+            } else {
+                getMimeType(entry.name)
+            }
+
+            var flags = if (entry.kind == FileKind.DIRECTORY) {
+                DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE
+            } else {
+                DocumentsContract.Document.FLAG_SUPPORTS_WRITE or
+                DocumentsContract.Document.FLAG_SUPPORTS_DELETE or
+                DocumentsContract.Document.FLAG_SUPPORTS_RENAME
+            }
+
+            // Add thumbnail support flag if file is available locally and supports thumbnails
+            if (entry.kind != FileKind.DIRECTORY && supportsThumbnails(mimeType)) {
+                val backingFilePath = service?.getBackingFilePath(documentId)
+                if (backingFilePath != null && java.io.File(backingFilePath).exists()) {
+                    flags = flags or DocumentsContract.Document.FLAG_SUPPORTS_THUMBNAIL
+                }
+            }
+
             result.newRow()
                 .add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, documentId)
                 .add(DocumentsContract.Document.COLUMN_SIZE, entry.size)
                 .add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, entry.name)
-                .add(DocumentsContract.Document.COLUMN_MIME_TYPE, if (entry.kind == FileKind.DIRECTORY) {
-                    DocumentsContract.Document.MIME_TYPE_DIR } else { getMimeType(entry.name) })
+                .add(DocumentsContract.Document.COLUMN_MIME_TYPE, mimeType)
                 .add(DocumentsContract.Document.COLUMN_FLAGS, flags)
                 .add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, entry.modificationTimeMs)
         }
@@ -367,10 +397,78 @@ class OrbitDocumentProvider : DocumentsProvider() {
         return false
     }
 
+    override fun openDocumentThumbnail(
+        documentId: String?,
+        sizeHint: Point?,
+        signal: CancellationSignal?
+    ): android.content.res.AssetFileDescriptor {
+        Log.d(TAG, "openDocumentThumbnail: $documentId, sizeHint: $sizeHint")
+
+        if (documentId == null) {
+            throw FileNotFoundException("Document ID is null")
+        }
+
+        val service = orbitService?.getService()
+            ?: throw FileNotFoundException("Orbit service not available")
+
+        // Get the backing file path
+        val backingFilePath = service.getBackingFilePath(documentId)
+        val backingFile = java.io.File(backingFilePath)
+
+        if (!backingFile.exists()) {
+            throw FileNotFoundException("Backing file not found: $backingFilePath")
+        }
+
+        val filename = documentId.split("/").last()
+        val mimeType = getMimeType(filename)
+
+        // Determine thumbnail size (default to 512x512 if no hint provided)
+        val thumbnailSize = if (sizeHint != null) {
+            Size(sizeHint.x, sizeHint.y)
+        } else {
+            Size(512, 512)
+        }
+
+        try {
+            val thumbnail = when {
+                mimeType.startsWith("image/") -> {
+                    ThumbnailUtils.createImageThumbnail(backingFile, thumbnailSize, signal)
+                }
+                mimeType.startsWith("video/") -> {
+                    ThumbnailUtils.createVideoThumbnail(backingFile, thumbnailSize, signal)
+                }
+                else -> {
+                    throw UnsupportedOperationException("Thumbnail not supported for MIME type: $mimeType")
+                }
+            }
+
+            // Create a temporary file to store the thumbnail
+            val tempFile = java.io.File.createTempFile("thumb_", ".png", context?.cacheDir)
+            tempFile.outputStream().use { output ->
+                thumbnail.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, output)
+            }
+
+            // Return the thumbnail as an AssetFileDescriptor
+            val pfd = ParcelFileDescriptor.open(
+                tempFile,
+                ParcelFileDescriptor.MODE_READ_ONLY
+            )
+
+            return android.content.res.AssetFileDescriptor(pfd, 0, tempFile.length())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error creating thumbnail: ${e.message}", e)
+            throw FileNotFoundException("Failed to create thumbnail: ${e.message}")
+        }
+    }
+
     override fun shutdown() {
         Log.d(TAG, "shutdown")
         super.shutdown()
         context?.unbindService(serviceConnection)
+    }
+
+    private fun supportsThumbnails(mimeType: String): Boolean {
+        return mimeType.startsWith("image/") || mimeType.startsWith("video/")
     }
 
     private fun getMimeType(filename: String): String {
