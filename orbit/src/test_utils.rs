@@ -1,6 +1,7 @@
 use crate::{ContentHash, Directory, DirectoryEntry, FileType, FsNode, FsNodeHash, OrbitFs};
 use chrono::Utc;
 use fuser::BackgroundSession;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 
@@ -32,6 +33,7 @@ pub fn create_test_file_node(size: u64) -> FsNode {
         modification_time: Utc::now(),
         content_hash: ContentHash::default(),
         kind: FileType::RegularFile,
+        extended_attributes: BTreeMap::new(),
     }
 }
 
@@ -41,6 +43,7 @@ pub fn create_test_dir_node(content_hash: ContentHash) -> FsNode {
         modification_time: Utc::now(),
         content_hash,
         kind: FileType::Directory,
+        extended_attributes: BTreeMap::new(),
     }
 }
 

@@ -66,7 +66,7 @@ pub fn readdir(
         let inodes = &runtime_data.inodes;
         let mut entry_offset = 3;
         for entry in directory.entries.iter() {
-            let fs_node = inodes[entry.inode_number.0 as usize];
+            let fs_node = &inodes[entry.inode_number.0 as usize];
             entries.push(RuntimeDirectoryEntryInfo {
                 ino: entry.inode_number.0 as u64,
                 offset: entry_offset,
@@ -92,7 +92,7 @@ pub fn mkdir(orbit_fs: &mut OrbitFs, parent: u64, name: &str) -> Result<FileAttr
         crate::RuntimeDirectory::default(),
         Some(InodeNumber(parent)),
     );
-    let inode_number = orbit_fs.assign_inode_number(fs_node);
+    let inode_number = orbit_fs.assign_inode_number(fs_node.clone());
     orbit_fs.add_directory_entry(
         InodeNumber(parent),
         crate::RuntimeDirectoryEntry {
@@ -122,7 +122,7 @@ pub fn create(
         Some(InodeNumber(parent)),
     );
 
-    let inode_number = orbit_fs.assign_inode_number(fs_node);
+    let inode_number = orbit_fs.assign_inode_number(fs_node.clone());
     let open_file = crate::OpenFile {
         backing_file: File::create_new(&temp_file_path).map_err(|_| libc::EIO)?,
         parent_inode_number: InodeNumber(parent),
@@ -155,7 +155,7 @@ pub fn open(orbit_fs: &mut OrbitFs, ino: u64, flags: i32) -> Result<u64, libc::c
     if writable {
         return Err(libc::ENOSYS);
     }
-    let fs_node = orbit_fs.runtime_data.read().inodes[ino as usize];
+    let fs_node = orbit_fs.runtime_data.read().inodes[ino as usize].clone();
     let content_hash = fs_node.content_hash;
     let path = PathBuf::from(
         orbit_fs.data_dir.clone()
@@ -256,7 +256,7 @@ pub fn release(orbit_fs: &mut OrbitFs, ino: u64, fh: u64) -> Result<(), libc::c_
         + "/"
         + &base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(content_hash.0);
     std::fs::rename(&open_file.path, &new_file_path).map_err(|_| libc::EIO)?;
-    let old_fs_node = orbit_fs.runtime_data.read().inodes[ino as usize];
+    let old_fs_node = orbit_fs.runtime_data.read().inodes[ino as usize].clone();
     let new_fs_node =
         orbit_fs.new_file_node_with_persistence(content_hash, size, Some(InodeNumber(ino)));
     orbit_fs.update_directory_entry(
@@ -301,6 +301,28 @@ pub fn unlink(orbit_fs: &mut OrbitFs, parent: u64, name: &str) -> Result<(), lib
         return Err(libc::EISDIR);
     }
     orbit_fs.remove_directory_entry(InodeNumber(parent), name)
+}
+
+pub fn setxattr(
+    orbit_fs: &mut OrbitFs,
+    ino: u64,
+    name: &str,
+    value: &[u8],
+    flags: i32,
+) -> Result<(), libc::c_int> {
+    orbit_fs.setxattr(ino, name, value, flags)
+}
+
+pub fn getxattr(orbit_fs: &OrbitFs, ino: u64, name: &str) -> Result<Vec<u8>, libc::c_int> {
+    orbit_fs.getxattr(ino, name)
+}
+
+pub fn listxattr(orbit_fs: &OrbitFs, ino: u64) -> Result<Vec<String>, libc::c_int> {
+    orbit_fs.listxattr(ino)
+}
+
+pub fn removexattr(orbit_fs: &mut OrbitFs, ino: u64, name: &str) -> Result<(), libc::c_int> {
+    orbit_fs.removexattr(ino, name)
 }
 
 pub fn rename(
@@ -572,10 +594,6 @@ impl Filesystem for OrbitFs {
         match lookup(self, parent, name_str) {
             Ok(attrs) => reply.entry(&Duration::from_millis(1), &attrs, 0),
             Err(error) => {
-                warn!(
-                    "lookup failed for parent {} name {}: {}",
-                    parent, name_str, error
-                );
                 reply.error(error);
             }
         }
@@ -633,6 +651,127 @@ impl Filesystem for OrbitFs {
                 warn!(
                     "rename failed for parent {} name {} to newparent {} newname {}: {}",
                     parent, old_name, newparent, new_name, error
+                );
+                reply.error(error);
+            }
+        }
+    }
+
+    fn setxattr(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: u64,
+        name: &std::ffi::OsStr,
+        value: &[u8],
+        flags: i32,
+        _position: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let attr_name = match name.to_str() {
+            Some(n) => n,
+            None => return reply.error(libc::EINVAL),
+        };
+
+        match setxattr(self, ino, attr_name, value, flags) {
+            Ok(()) => reply.ok(),
+            Err(error) => {
+                warn!(
+                    "setxattr failed for ino {} name {}: {}",
+                    ino, attr_name, error
+                );
+                reply.error(error);
+            }
+        }
+    }
+
+    fn getxattr(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: u64,
+        name: &std::ffi::OsStr,
+        size: u32,
+        reply: fuser::ReplyXattr,
+    ) {
+        let attr_name = match name.to_str() {
+            Some(n) => n,
+            None => return reply.error(libc::EINVAL),
+        };
+
+        match getxattr(self, ino, attr_name) {
+            Ok(value) => {
+                if size == 0 {
+                    // Caller wants to know the size
+                    reply.size(value.len() as u32);
+                } else if value.len() <= size as usize {
+                    // Return the actual data
+                    reply.data(&value);
+                } else {
+                    // Value doesn't fit in the provided buffer
+                    reply.error(libc::ERANGE);
+                }
+            }
+            Err(error) => {
+                warn!(
+                    "getxattr failed for ino {} name {}: {}",
+                    ino, attr_name, error
+                );
+                reply.error(error);
+            }
+        }
+    }
+
+    fn listxattr(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: u64,
+        size: u32,
+        reply: fuser::ReplyXattr,
+    ) {
+        match listxattr(self, ino) {
+            Ok(names) => {
+                // Format as null-terminated strings
+                let mut buffer = Vec::new();
+                for name in names {
+                    buffer.extend_from_slice(name.as_bytes());
+                    buffer.push(0); // null terminator
+                }
+
+                if size == 0 {
+                    // Caller wants to know the size
+                    reply.size(buffer.len() as u32);
+                } else if buffer.len() <= size as usize {
+                    // Return the actual data
+                    reply.data(&buffer);
+                } else {
+                    // Data doesn't fit in the provided buffer
+                    reply.error(libc::ERANGE);
+                }
+            }
+            Err(error) => {
+                warn!("listxattr failed for ino {}: {}", ino, error);
+                reply.error(error);
+            }
+        }
+    }
+
+    fn removexattr(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: u64,
+        name: &std::ffi::OsStr,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let attr_name = match name.to_str() {
+            Some(n) => n,
+            None => return reply.error(libc::EINVAL),
+        };
+
+        match removexattr(self, ino, attr_name) {
+            Ok(()) => reply.ok(),
+            Err(error) => {
+                warn!(
+                    "removexattr failed for ino {} name {}: {}",
+                    ino, attr_name, error
                 );
                 reply.error(error);
             }

@@ -105,7 +105,7 @@ pub enum FileType {
     Symlink,
 }
 
-#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeFsNode {
     /// (recursive?) size in bytes
     pub size: u64,
@@ -115,6 +115,9 @@ pub struct RuntimeFsNode {
     pub content_hash: ContentHash,
     /// Kind of file
     pub kind: FileType,
+    /// Extended attributes (xattrs)
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub extended_attributes: BTreeMap<String, Vec<u8>>,
     #[serde(skip)]
     pub parent_inode_number: Option<InodeNumber>,
 }
@@ -134,6 +137,7 @@ impl RuntimeFsNode {
             modification_time: Utc::now(),
             size,
             content_hash,
+            extended_attributes: BTreeMap::new(),
             parent_inode_number,
         }
     }
@@ -148,6 +152,7 @@ impl RuntimeFsNode {
             modification_time: Utc::now(),
             size,
             content_hash,
+            extended_attributes: BTreeMap::new(),
             parent_inode_number,
         }
     }
@@ -157,7 +162,7 @@ impl RuntimeFsNode {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct FsNode {
     /// (recursive?) size in bytes
     pub size: u64,
@@ -167,6 +172,9 @@ pub struct FsNode {
     pub content_hash: ContentHash,
     /// Kind of file
     pub kind: FileType,
+    /// Extended attributes (xattrs)
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub extended_attributes: BTreeMap<String, Vec<u8>>,
 }
 
 impl FsNode {
@@ -184,6 +192,7 @@ impl FsNode {
             modification_time: self.modification_time,
             content_hash: self.content_hash,
             kind: self.kind,
+            extended_attributes: self.extended_attributes.clone(),
             parent_inode_number,
         }
     }
@@ -268,6 +277,7 @@ impl From<&RuntimeFsNode> for FsNode {
             modification_time: runtime_node.modification_time,
             content_hash: runtime_node.content_hash,
             kind: runtime_node.kind,
+            extended_attributes: runtime_node.extended_attributes.clone(),
         }
     }
 }
@@ -279,6 +289,7 @@ impl From<RuntimeFsNode> for FsNode {
             modification_time: runtime_node.modification_time,
             content_hash: runtime_node.content_hash,
             kind: runtime_node.kind,
+            extended_attributes: runtime_node.extended_attributes,
         }
     }
 }
@@ -366,6 +377,7 @@ impl OrbitFs {
                 content_hash: initial_directory.calculate_hash(),
                 modification_time: DateTime::<Utc>::default(),
                 kind: FileType::Directory,
+                extended_attributes: BTreeMap::new(),
                 parent_inode_number: None,
                 size: 0,
             };
@@ -374,7 +386,7 @@ impl OrbitFs {
                 .persist_directory(&(&initial_directory).into())?;
             orbit_fs
                 .persistence
-                .persist_fs_node(&initial_root_node.into())?;
+                .persist_fs_node(&(&initial_root_node).into())?;
             orbit_fs
                 .runtime_data
                 .write()
@@ -395,7 +407,7 @@ impl OrbitFs {
     }
 
     pub fn get_root_node(&self) -> RuntimeFsNode {
-        self.runtime_data.read().inodes[1]
+        self.runtime_data.read().inodes[1].clone()
     }
 
     /// Check if one block is an ancestor of another by walking the block chain backwards
@@ -598,7 +610,7 @@ impl OrbitFs {
         } else {
             new_dir_node.as_runtime_fs_node(None)
         };
-        self.runtime_data.write().inodes[inode_number.0 as usize] = new_dir_node;
+        self.runtime_data.write().inodes[inode_number.0 as usize] = new_dir_node.clone();
         if inode_number.0 == 1 {
             // This is the root - create and persist a new block
             let old_block = self.runtime_data.read().current_block.clone();
@@ -645,7 +657,7 @@ impl OrbitFs {
             .persistence
             .load_fs_node(fs_node_hash)?
             .as_runtime_fs_node(parent_inode_number);
-        let inode_number = self.assign_inode_number(fs_node);
+        let inode_number = self.assign_inode_number(fs_node.clone());
         if fs_node.is_directory() {
             // Load the directory structure
             match self.persistence.load_directory(&fs_node.content_hash) {
@@ -689,7 +701,7 @@ impl OrbitFs {
         if let Err(e) = self.persistence.persist_directory(&(&directory).into()) {
             error!("Failed to persist directory: {}", e);
         }
-        if let Err(e) = self.persistence.persist_fs_node(&directory_node.into()) {
+        if let Err(e) = self.persistence.persist_fs_node(&(&directory_node).into()) {
             error!("Failed to persist RuntimeFsNode: {}", e);
         }
 
@@ -714,7 +726,7 @@ impl OrbitFs {
     ) -> RuntimeFsNode {
         let fs_node = RuntimeFsNode::new_file_node(content_hash, size, parent_inode_number);
 
-        if let Err(e) = self.persistence.persist_fs_node(&fs_node.into()) {
+        if let Err(e) = self.persistence.persist_fs_node(&(&fs_node).into()) {
             error!("Failed to persist RuntimeFsNode: {}", e);
         }
 
@@ -784,7 +796,7 @@ impl OrbitFs {
     ) -> Result<(), i32> {
         let new_directory_node =
             self.new_directory_node(new_directory, old_directory_node.parent_inode_number);
-        self.runtime_data.write().inodes[inode_number.0 as usize] = new_directory_node;
+        self.runtime_data.write().inodes[inode_number.0 as usize] = new_directory_node.clone();
         if let Some(parent_inode) = old_directory_node.parent_inode_number {
             self.update_directory_entry(
                 parent_inode,
@@ -819,7 +831,7 @@ impl OrbitFs {
         let Some(directory) = runtime_data.directories.get(&fs_node.content_hash) else {
             return Err(libc::ENOTDIR);
         };
-        Ok((*fs_node, directory.clone()))
+        Ok((fs_node.clone(), directory.clone()))
     }
 
     fn sent_messages_for_changed_root(&self, _old_hash: FsNodeHash) {
@@ -836,6 +848,87 @@ impl OrbitFs {
             .persistence
             .diff(&current_block_hash, &previous_block_hash);
         network_comm.notify_latest_block(history, current_block);
+    }
+
+    /// Set an extended attribute on a file or directory
+    pub fn setxattr(
+        &mut self,
+        ino: u64,
+        name: &str,
+        value: &[u8],
+        flags: i32,
+    ) -> Result<(), libc::c_int> {
+        use libc::{EEXIST, ENODATA, ENOENT};
+
+        let mut runtime_data = self.runtime_data.write();
+        let fs_node = runtime_data.inodes.get_mut(ino as usize).ok_or(ENOENT)?;
+
+        // Check flags
+        if flags & libc::XATTR_CREATE != 0 && fs_node.extended_attributes.contains_key(name) {
+            return Err(EEXIST);
+        }
+        if flags & libc::XATTR_REPLACE != 0 && !fs_node.extended_attributes.contains_key(name) {
+            return Err(ENODATA);
+        }
+
+        // Set the attribute
+        fs_node
+            .extended_attributes
+            .insert(name.to_string(), value.to_vec());
+
+        // Persist the updated node
+        drop(runtime_data);
+        let fs_node_clone = self.runtime_data.read().inodes[ino as usize].clone();
+        if let Err(e) = self.persistence.persist_fs_node(&(&fs_node_clone).into()) {
+            error!("Failed to persist updated fs_node after setxattr: {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Get an extended attribute from a file or directory
+    pub fn getxattr(&self, ino: u64, name: &str) -> Result<Vec<u8>, libc::c_int> {
+        use libc::{ENODATA, ENOENT};
+
+        let runtime_data = self.runtime_data.read();
+        let fs_node = runtime_data.inodes.get(ino as usize).ok_or(ENOENT)?;
+
+        fs_node
+            .extended_attributes
+            .get(name)
+            .map(|v| v.clone())
+            .ok_or(ENODATA)
+    }
+
+    /// List all extended attribute names for a file or directory
+    pub fn listxattr(&self, ino: u64) -> Result<Vec<String>, libc::c_int> {
+        use libc::ENOENT;
+
+        let runtime_data = self.runtime_data.read();
+        let fs_node = runtime_data.inodes.get(ino as usize).ok_or(ENOENT)?;
+
+        Ok(fs_node.extended_attributes.keys().cloned().collect())
+    }
+
+    /// Remove an extended attribute from a file or directory
+    pub fn removexattr(&mut self, ino: u64, name: &str) -> Result<(), libc::c_int> {
+        use libc::{ENODATA, ENOENT};
+
+        let mut runtime_data = self.runtime_data.write();
+        let fs_node = runtime_data.inodes.get_mut(ino as usize).ok_or(ENOENT)?;
+
+        if fs_node.extended_attributes.remove(name).is_none() {
+            return Err(ENODATA);
+        }
+
+        // Persist the updated node
+        drop(runtime_data);
+        let fs_node_clone = self.runtime_data.read().inodes[ino as usize].clone();
+        if let Err(e) = self.persistence.persist_fs_node(&(&fs_node_clone).into()) {
+            error!("Failed to persist updated fs_node after removexattr: {}", e);
+        }
+
+        Ok(())
     }
 }
 
@@ -896,7 +989,7 @@ impl OrbitFsWrapper {
             current_node = runtime_data
                 .inodes
                 .get(entry.inode_number.0 as usize)
-                .copied()
+                .cloned()
                 .ok_or_else(|| format!("Path not found: {}", path))?;
         }
 
@@ -934,7 +1027,7 @@ impl OrbitFsWrapper {
                 runtime_data
                     .inodes
                     .get(entry.inode_number.0 as usize)
-                    .map(|node| (entry.name.clone(), (*node).into()))
+                    .map(|node| (entry.name.clone(), node.clone().into()))
             })
             .collect();
 

@@ -36,6 +36,7 @@ fn initialize_orbit_fs(
 async fn main() -> Result<(), anyhow::Error> {
     env_logger::Builder::from_default_env()
         .filter(None, LevelFilter::Warn)
+        .filter(Some("netlink_packet_route"), LevelFilter::Error)
         .filter(Some("orbit"), LevelFilter::Debug)
         .init();
 
