@@ -51,6 +51,7 @@ class OrbitDocumentProvider : DocumentsProvider() {
     }
 
     private var orbitService: OrbitService.OrbitBinder? = null
+    private lateinit var thumbnailCache: ThumbnailCache
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             Log.d(TAG, "Service connected")
@@ -76,6 +77,7 @@ class OrbitDocumentProvider : DocumentsProvider() {
 
     override fun onCreate(): Boolean {
         Log.d(TAG, "onCreate")
+        thumbnailCache = ThumbnailCache(context!!)
         val intent = Intent(context, OrbitService::class.java)
         context?.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
         return true
@@ -408,6 +410,24 @@ class OrbitDocumentProvider : DocumentsProvider() {
             throw FileNotFoundException("Document ID is null")
         }
 
+        // Determine thumbnail size (default to 512x512 if no hint provided)
+        val thumbnailSize = if (sizeHint != null) {
+            Size(sizeHint.x, sizeHint.y)
+        } else {
+            Size(512, 512)
+        }
+
+        // Check cache first
+        val cachedThumbnail = thumbnailCache.getCachedThumbnail(documentId, thumbnailSize)
+        if (cachedThumbnail != null) {
+            val pfd = ParcelFileDescriptor.open(
+                cachedThumbnail,
+                ParcelFileDescriptor.MODE_READ_ONLY
+            )
+            return android.content.res.AssetFileDescriptor(pfd, 0, cachedThumbnail.length())
+        }
+
+        // Cache miss - generate thumbnail
         val service = orbitService?.getService()
             ?: throw FileNotFoundException("Orbit service not available")
 
@@ -422,13 +442,6 @@ class OrbitDocumentProvider : DocumentsProvider() {
         val filename = documentId.split("/").last()
         val mimeType = getMimeType(filename)
 
-        // Determine thumbnail size (default to 512x512 if no hint provided)
-        val thumbnailSize = if (sizeHint != null) {
-            Size(sizeHint.x, sizeHint.y)
-        } else {
-            Size(512, 512)
-        }
-
         try {
             val thumbnail = when {
                 mimeType.startsWith("image/") -> {
@@ -442,19 +455,19 @@ class OrbitDocumentProvider : DocumentsProvider() {
                 }
             }
 
-            // Create a temporary file to store the thumbnail
-            val tempFile = java.io.File.createTempFile("thumb_", ".png", context?.cacheDir)
-            tempFile.outputStream().use { output ->
+            // Save to cache
+            val cacheFile = thumbnailCache.createCacheFile(documentId, thumbnailSize)
+            cacheFile.outputStream().use { output ->
                 thumbnail.compress(android.graphics.Bitmap.CompressFormat.PNG, 90, output)
             }
 
-            // Return the thumbnail as an AssetFileDescriptor
+            // Return the cached thumbnail
             val pfd = ParcelFileDescriptor.open(
-                tempFile,
+                cacheFile,
                 ParcelFileDescriptor.MODE_READ_ONLY
             )
 
-            return android.content.res.AssetFileDescriptor(pfd, 0, tempFile.length())
+            return android.content.res.AssetFileDescriptor(pfd, 0, cacheFile.length())
         } catch (e: Exception) {
             Log.e(TAG, "Error creating thumbnail: ${e.message}", e)
             throw FileNotFoundException("Failed to create thumbnail: ${e.message}")
