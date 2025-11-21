@@ -79,6 +79,9 @@ class OrbitDocumentProvider : DocumentsProvider() {
         Log.d(TAG, "onCreate")
         thumbnailCache = ThumbnailCache(context!!)
         val intent = Intent(context, OrbitService::class.java)
+        // Force-start the service as a foreground service
+        context?.startService(intent)
+        // Then bind to it
         context?.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
         return true
     }

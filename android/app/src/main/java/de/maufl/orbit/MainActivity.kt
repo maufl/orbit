@@ -22,6 +22,9 @@ class MainActivity : ComponentActivity() {
         // Start the OrbitService
         startService(Intent(this, OrbitService::class.java))
 
+        // Schedule periodic work to keep service running
+        OrbitServiceScheduler.schedulePeriodicWork(this)
+
         setContent {
             OrbitTheme {
                 FileBrowserScreen()

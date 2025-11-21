@@ -1,15 +1,21 @@
 package de.maufl.orbit
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.net.wifi.WifiManager
 import android.os.Binder
+import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import androidx.core.app.NotificationCompat
+import androidx.core.content.edit
 import uniffi.orbit_android.Config
 import uniffi.orbit_android.OrbitClient
-import androidx.core.content.edit
 import uniffi.orbit_android.DirectoryEntryInfo
 import uniffi.orbit_android.FsNodeInfo
 import uniffi.orbit_android.FileRequestCallback
@@ -26,6 +32,8 @@ class OrbitService : Service() {
         private const val TAG = "OrbitService"
         private const val PREFS_NAME = "orbit_prefs"
         private const val KEY_PRIVATE_KEY = "private_key"
+        private const val NOTIFICATION_ID = 1
+        private const val CHANNEL_ID = "orbit_service_channel"
     }
 
     inner class OrbitBinder : Binder() {
@@ -39,6 +47,10 @@ class OrbitService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+
+        // Create notification channel and start foreground service
+        createNotificationChannel()
+        startForeground(NOTIFICATION_ID, createNotification())
 
         // Get SharedPreferences
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -74,6 +86,43 @@ class OrbitService : Service() {
                 Log.i(TAG, "Saved new secret key to SharedPreferences")
             }
         }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "onStartCommand called")
+        return START_STICKY
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Orbit Service",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Keeps Orbit filesystem running in the background"
+            }
+
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun createNotification(): Notification {
+        val notificationIntent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            notificationIntent,
+            PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Orbit")
+            .setContentText("Filesystem is running")
+            .setSmallIcon(R.drawable.orbit)
+            .setContentIntent(pendingIntent)
+            .build()
     }
 
     override fun onDestroy() {
