@@ -28,6 +28,20 @@ build-docker:
 build:
   stage: build
   image: $CI_IMAGE
+  cache:
+    key:
+      files:
+        - Cargo.lock
+        - orbit/Cargo.lock
+        - orbit-android/Cargo.lock
+    paths:
+      - .cargo/registry
+      - .cargo/git
+      - target/
+      - android/.gradle
+      - android/app/build
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
   script:
     - chmod +x .ci/build.sh
     - ./.ci/build.sh
