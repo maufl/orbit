@@ -30,7 +30,7 @@ fi
 echo ""
 echo "=== Building orbitd ==="
 cd "$PROJECT_ROOT"
-cargo build --release -p orbitd
+cargo build --release --bin orbitd --features fuse
 cp target/release/orbitd "$ARTIFACTS_DIR/"
 echo "Built: $ARTIFACTS_DIR/orbitd"
 

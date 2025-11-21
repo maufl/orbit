@@ -32,7 +32,7 @@ jobs:
 
           # Install system dependencies
           sudo apt-get update
-          sudo apt-get install -y libfuse3-dev pkg-config
+          sudo apt-get install -y libfuse3-dev pkg-config python3 python-is-python3
 
           # Install Android SDK command line tools
           export ANDROID_HOME="$HOME/android-sdk"
