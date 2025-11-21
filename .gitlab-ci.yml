@@ -32,8 +32,6 @@ build:
     key:
       files:
         - Cargo.lock
-        - orbit/Cargo.lock
-        - orbit-android/Cargo.lock
     paths:
       - .cargo/registry
       - .cargo/git
