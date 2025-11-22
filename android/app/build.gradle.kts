@@ -71,11 +71,9 @@ cargo {
 }
 
 // Fix Python 3.13 compatibility in linker-wrapper
-val fixLinkerWrapper = tasks.register("fixLinkerWrapper") {
-    description = "Fix Python 3.13 compatibility in generated linker-wrapper"
-    group = "build"
-
-    doLast {
+// This runs as a doFirst action on cargoBuild tasks, after the wrapper is generated
+tasks.matching { it.name.startsWith("cargoBuild") }.configureEach {
+    doFirst {
         val wrapperFile = file("${project.rootDir}/build/linker-wrapper/linker-wrapper.py")
         if (wrapperFile.exists()) {
             val content = wrapperFile.readText()
@@ -87,11 +85,6 @@ val fixLinkerWrapper = tasks.register("fixLinkerWrapper") {
             }
         }
     }
-}
-
-// Ensure linker wrapper is fixed before cargo builds
-tasks.matching { it.name.startsWith("cargoBuild") }.configureEach {
-    dependsOn(fixLinkerWrapper)
 }
 
 // Generate UniFFI bindings
