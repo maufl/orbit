@@ -18,6 +18,8 @@ pub struct Config {
     pub data_dir: String,
     /// List of peer node IDs to connect to on startup (hex encoded)
     pub peer_node_ids: Vec<String>,
+    /// Optional human-readable name for this node (used for discovery)
+    pub node_name: Option<String>,
 }
 
 /// A simplified Orbit client for use from foreign language bindings
@@ -88,7 +90,7 @@ impl OrbitClient {
         }
 
         let network_communication = runtime.block_on(async {
-            IrohNetworkCommunication::build(secret_key)
+            IrohNetworkCommunication::build(secret_key, config.node_name.clone())
                 .await
                 .map_err(|e| OrbitError::InitializationError {
                     error_message: format!("Failed to build network communication: {}", e),
@@ -263,6 +265,74 @@ impl OrbitClient {
                 callback.on_root_changed();
             }));
     }
+
+    /// Register a callback to be called when peers are discovered on the local network
+    ///
+    /// This uses mDNS to discover other Orbit nodes on the same local network.
+    /// The callback will be invoked on a background thread whenever a peer is discovered or expires.
+    ///
+    /// # Arguments
+    /// * `callback` - Callback to invoke when peers are discovered or expire
+    pub fn register_peer_discovery_callback(&self, callback: Arc<dyn PeerDiscoveryCallback>) {
+        let network_communication = self.network_communication.clone();
+
+        info!("Registering peer discovery callback");
+
+        // Spawn a task to subscribe to mDNS events
+        self.runtime.spawn(async move {
+            if let Some(mdns) = &network_communication.mdns_discovery {
+                info!("mDNS discovery is enabled, subscribing to events");
+                let mut events = mdns.subscribe().await;
+
+                use futures::StreamExt;
+                use orbit::network::MdnsDiscoveryEvent;
+
+                info!("Waiting for mDNS discovery events...");
+                while let Some(event) = events.next().await {
+                    match event {
+                        MdnsDiscoveryEvent::Discovered {
+                            endpoint_info,
+                            last_updated,
+                        } => {
+                            info!(
+                                "Peer discovered via mDNS: {}",
+                                hex::encode(endpoint_info.endpoint_id.as_bytes())
+                            );
+
+                            // Filter for Orbit nodes and extract the node name
+                            let user_data = endpoint_info.data.user_data();
+                            let node_name = if let Some(data) = user_data {
+                                let data_str = data.as_ref();
+                                if let Some(name) = data_str.strip_prefix("orbit:") {
+                                    Some(name.to_string())
+                                } else {
+                                    info!("Discovered endpoint without 'orbit:' prefix, ignoring");
+                                    continue;
+                                }
+                            } else {
+                                info!("Discovered endpoint without user data, ignoring");
+                                continue;
+                            };
+
+                            let peer_info = PeerInfo {
+                                node_id: hex::encode(endpoint_info.endpoint_id.as_bytes()),
+                                node_name,
+                                last_seen_ms: last_updated.map(|ts| ts as i64),
+                            };
+                            callback.on_peer_discovered(peer_info);
+                        }
+                        MdnsDiscoveryEvent::Expired { endpoint_id } => {
+                            let node_id = hex::encode(endpoint_id.as_bytes());
+                            info!("Peer expired via mDNS: {}", node_id);
+                            callback.on_peer_expired(node_id);
+                        }
+                    }
+                }
+            } else {
+                info!("mDNS discovery is NOT enabled");
+            }
+        });
+    }
 }
 
 /// Information about a filesystem node
@@ -327,6 +397,26 @@ pub trait FileRequestCallback: Send + Sync {
 pub trait RootChangeCallback: Send + Sync {
     /// Called when the filesystem root has changed
     fn on_root_changed(&self);
+}
+
+/// Information about a discovered peer
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct PeerInfo {
+    /// The node ID of the peer (hex encoded)
+    pub node_id: String,
+    /// Optional human-readable name of the peer
+    pub node_name: Option<String>,
+    /// Optional timestamp when this peer was last seen (milliseconds since epoch)
+    pub last_seen_ms: Option<i64>,
+}
+
+/// Callback trait for peer discovery notifications
+#[uniffi::export(with_foreign)]
+pub trait PeerDiscoveryCallback: Send + Sync {
+    /// Called when a peer is discovered on the local network
+    fn on_peer_discovered(&self, peer: PeerInfo);
+    /// Called when a peer expires (no longer advertising)
+    fn on_peer_expired(&self, node_id: String);
 }
 
 /// Errors that can occur in Orbit operations

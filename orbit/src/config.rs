@@ -15,6 +15,8 @@ pub struct Config {
     pub mount_point: String,
     /// List of peer node IDs to connect to on startup (hex encoded)
     pub peer_node_ids: Vec<String>,
+    /// Optional human-readable name for this node (used for discovery)
+    pub node_name: Option<String>,
 }
 
 pub fn new_secret_key() -> SecretKey {
@@ -32,6 +34,7 @@ impl Default for Config {
             data_dir: format!("{}/orbit_data", data_home),
             mount_point: format!("{}/Orbit", home),
             peer_node_ids: Vec::new(),
+            node_name: None,
         }
     }
 }

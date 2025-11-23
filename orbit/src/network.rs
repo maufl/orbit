@@ -6,9 +6,14 @@ use crate::{Block, BlockHash, ContentHash, OrbitFs};
 use async_trait::async_trait;
 use base64::Engine;
 use bytes::{BufMut, Bytes, BytesMut};
+use iroh::discovery::mdns::MdnsDiscovery;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint_info::UserData;
 use iroh::{Endpoint, EndpointAddr, PublicKey, SecretKey};
 use log::{debug, error, info, warn};
+
+// Re-export types needed by orbit-android
+pub use iroh::discovery::mdns::DiscoveryEvent as MdnsDiscoveryEvent;
 use serde::{Deserialize, Serialize};
 use tokio::{
     runtime::Handle,
@@ -75,16 +80,45 @@ pub struct IrohNetworkCommunication {
     tokio_runtime_handle: Handle,
     content_notification_sender: Sender<ContentHash>,
     block_notification_sender: Sender<Vec<Block>>,
+    pub mdns_discovery: Option<MdnsDiscovery>,
 }
 
 impl IrohNetworkCommunication {
-    pub async fn build(secret_key: SecretKey) -> anyhow::Result<IrohNetworkCommunication> {
+    pub async fn build(
+        secret_key: SecretKey,
+        node_name: Option<String>,
+    ) -> anyhow::Result<IrohNetworkCommunication> {
+        info!("Building endpoint for local network peer discovery");
+
+        // Build endpoint first (without discovery)
         let endpoint = Endpoint::builder()
             .secret_key(secret_key)
             .alpns(vec![APLN.as_bytes().to_vec()])
             .bind()
             .await?;
+
         info!("Node ID is {}", endpoint.id());
+
+        // Now create mDNS discovery with the endpoint's ID
+        let mdns = MdnsDiscovery::builder().build(endpoint.id())?;
+        info!("Created mDNS discovery service");
+
+        // Add mDNS discovery to the endpoint
+        endpoint.discovery().add(mdns.clone());
+        info!("mDNS discovery added to endpoint");
+
+        // Set user data to trigger publishing our endpoint info to mDNS
+        // Use "orbit:" prefix followed by the node name to identify Orbit nodes
+        let name = node_name.unwrap_or_else(|| "unnamed".to_string());
+        let user_data_str = format!("orbit:{}", name);
+        let user_data = UserData::try_from(user_data_str.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to create user data: {}", e))?;
+        endpoint.set_user_data_for_discovery(Some(user_data));
+        info!(
+            "Triggered mDNS advertisement with name '{}' - now advertising and listening on local network",
+            name
+        );
+
         let (content_notification_sender, _content_notification_receiver) =
             tokio::sync::broadcast::channel(10);
         let (block_notification_sender, _block_notification_receiver) =
@@ -96,6 +130,7 @@ impl IrohNetworkCommunication {
             tokio_runtime_handle: tokio::runtime::Handle::current(),
             content_notification_sender,
             block_notification_sender,
+            mdns_discovery: Some(mdns),
         })
     }
 

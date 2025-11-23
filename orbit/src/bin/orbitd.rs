@@ -62,7 +62,8 @@ async fn main() -> Result<(), anyhow::Error> {
         base32::encode(base32::Alphabet::Z, secret_key.public().as_bytes())
     );
     let (shutdown_sender, shutdown_receiver) = tokio::sync::broadcast::channel(1);
-    let iroh_network_communication = Arc::new(IrohNetworkCommunication::build(secret_key).await?);
+    let iroh_network_communication =
+        Arc::new(IrohNetworkCommunication::build(secret_key, config.node_name.clone()).await?);
     let orbit_fs = initialize_orbit_fs(&config, iroh_network_communication.clone());
     info!(
         "Current root hash is {}",

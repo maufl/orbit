@@ -21,6 +21,7 @@ import uniffi.orbit_android.FsNodeInfo
 import uniffi.orbit_android.FileRequestCallback
 import uniffi.orbit_android.FileRequestResult
 import uniffi.orbit_android.RootChangeCallback
+import uniffi.orbit_android.PeerDiscoveryCallback
 
 class OrbitService : Service() {
 
@@ -65,10 +66,13 @@ class OrbitService : Service() {
         }
 
         // Create config with optional private key
+        // Use device model as default node name
+        val deviceName = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
         val config = Config(
             privateKey = privateKey,
             dataDir = filesDir.toString(),
-            peerNodeIds = listOf()
+            peerNodeIds = listOf(),
+            nodeName = deviceName
         )
 
         val wifiManager = getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -157,5 +161,11 @@ class OrbitService : Service() {
 
     fun registerRootChangeCallback(callback: RootChangeCallback) {
         orbitClient.registerRootChangeCallback(callback)
+    }
+
+    fun registerPeerDiscoveryCallback(callback: PeerDiscoveryCallback) {
+        Log.d(TAG, "registerPeerDiscoveryCallback called")
+        orbitClient.registerPeerDiscoveryCallback(callback)
+        Log.d(TAG, "Peer discovery callback registered with OrbitClient")
     }
 }

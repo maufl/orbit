@@ -16,6 +16,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material3.*
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.*
@@ -29,12 +30,18 @@ import uniffi.orbit_android.DirectoryEntryInfo
 import uniffi.orbit_android.FileKind
 import uniffi.orbit_android.RootChangeCallback
 
+enum class NavigationScreen {
+    FILES,
+    PEER_DISCOVERY
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FileBrowserScreen() {
     val context = LocalContext.current
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    var selectedScreen by remember { mutableStateOf(NavigationScreen.FILES) }
 
     var orbitService by remember { mutableStateOf<OrbitService?>(null) }
     var currentPath by remember { mutableStateOf("/") }
@@ -111,89 +118,132 @@ fun FileBrowserScreen() {
                 HorizontalDivider()
                 NavigationDrawerItem(
                     label = { Text("Files") },
-                    selected = true,
+                    selected = selectedScreen == NavigationScreen.FILES,
+                    icon = { Icon(Icons.Default.Folder, contentDescription = "Files") },
                     onClick = {
+                        selectedScreen = NavigationScreen.FILES
                         scope.launch {
                             drawerState.close()
                         }
                     }
                 )
-                // Add more menu items here in the future
+                NavigationDrawerItem(
+                    label = { Text("Discover Peers") },
+                    selected = selectedScreen == NavigationScreen.PEER_DISCOVERY,
+                    icon = { Icon(Icons.Default.Devices, contentDescription = "Discover Peers") },
+                    onClick = {
+                        selectedScreen = NavigationScreen.PEER_DISCOVERY
+                        scope.launch {
+                            drawerState.close()
+                        }
+                    }
+                )
             }
         }
     ) {
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = { Text(text = currentPath) },
+                    title = {
+                        Text(text = when (selectedScreen) {
+                            NavigationScreen.FILES -> currentPath
+                            NavigationScreen.PEER_DISCOVERY -> "Discover Peers"
+                        })
+                    },
                     navigationIcon = {
-                        if (currentPath != "/") {
-                            IconButton(onClick = {
-                                currentPath = currentPath.substringBeforeLast("/").ifEmpty { "/" }
-                            }) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Navigate up")
-                            }
-                        } else {
-                            IconButton(onClick = {
-                                scope.launch {
-                                    drawerState.open()
+                        when (selectedScreen) {
+                            NavigationScreen.FILES -> {
+                                if (currentPath != "/") {
+                                    IconButton(onClick = {
+                                        currentPath = currentPath.substringBeforeLast("/").ifEmpty { "/" }
+                                    }) {
+                                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Navigate up")
+                                    }
+                                } else {
+                                    IconButton(onClick = {
+                                        scope.launch {
+                                            drawerState.open()
+                                        }
+                                    }) {
+                                        Icon(Icons.Default.Menu, "Open menu")
+                                    }
                                 }
-                            }) {
-                                Icon(Icons.Default.Menu, "Open menu")
+                            }
+                            NavigationScreen.PEER_DISCOVERY -> {
+                                IconButton(onClick = {
+                                    scope.launch {
+                                        drawerState.open()
+                                    }
+                                }) {
+                                    Icon(Icons.Default.Menu, "Open menu")
+                                }
                             }
                         }
                     }
                 )
             }
         ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-        ) {
-            when {
-                isLoading -> {
-                    CircularProgressIndicator(
-                        modifier = Modifier.align(Alignment.Center)
-                    )
-                }
-                error != null -> {
-                    Text(
-                        text = "Error: $error",
-                        color = MaterialTheme.colorScheme.error,
+            when (selectedScreen) {
+                NavigationScreen.FILES -> {
+                    Box(
                         modifier = Modifier
-                            .align(Alignment.Center)
-                            .padding(16.dp)
-                    )
-                }
-                entries.isEmpty() -> {
-                    Text(
-                        text = "Empty directory",
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .padding(16.dp)
-                    )
-                }
-                else -> {
-                    LazyColumn {
-                        items(entries) { entry ->
-                            FileListItem(
-                                entry = entry,
-                                onClick = {
-                                    if (entry.kind == FileKind.DIRECTORY) {
-                                        currentPath = if (currentPath == "/") {
-                                            "/${entry.name}"
-                                        } else {
-                                            "$currentPath/${entry.name}"
-                                        }
+                            .fillMaxSize()
+                            .padding(paddingValues)
+                    ) {
+                        when {
+                            isLoading -> {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.align(Alignment.Center)
+                                )
+                            }
+                            error != null -> {
+                                Text(
+                                    text = "Error: $error",
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier
+                                        .align(Alignment.Center)
+                                        .padding(16.dp)
+                                )
+                            }
+                            entries.isEmpty() -> {
+                                Text(
+                                    text = "Empty directory",
+                                    modifier = Modifier
+                                        .align(Alignment.Center)
+                                        .padding(16.dp)
+                                )
+                            }
+                            else -> {
+                                LazyColumn {
+                                    items(entries) { entry ->
+                                        FileListItem(
+                                            entry = entry,
+                                            onClick = {
+                                                if (entry.kind == FileKind.DIRECTORY) {
+                                                    currentPath = if (currentPath == "/") {
+                                                        "/${entry.name}"
+                                                    } else {
+                                                        "$currentPath/${entry.name}"
+                                                    }
+                                                }
+                                            }
+                                        )
                                     }
                                 }
-                            )
+                            }
                         }
                     }
                 }
+                NavigationScreen.PEER_DISCOVERY -> {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(paddingValues)
+                    ) {
+                        PeerDiscoveryScreen()
+                    }
+                }
             }
-        }
         }
     }
 }
