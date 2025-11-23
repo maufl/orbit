@@ -63,7 +63,7 @@ val targetToRustTriple = mapOf(
 )
 
 cargo {
-    module = "../../orbit-android"  // Relative path to Cargo.toml directory
+    module = "../../rust/orbit-android"  // Relative path to Cargo.toml directory
     libname = "orbit_android"       // Must match the [lib] name in Cargo.toml
     targets = rustTargets
     profile = rustProfile

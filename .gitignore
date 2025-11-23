@@ -8,3 +8,4 @@ android/app/src/main/jniLibs/x86_64
 android/app/src/main/jniLibs/arm64-v8a
 .docker-cache
 artifacts
+android/.kotlin
