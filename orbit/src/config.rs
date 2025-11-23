@@ -5,6 +5,16 @@ use iroh::SecretKey;
 use log::debug;
 use serde::{Deserialize, Serialize};
 
+fn default_socket_path() -> String {
+    let runtime_dir = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
+        format!(
+            "/tmp/orbit-{}",
+            env::var("USER").unwrap_or_else(|_| "user".to_string())
+        )
+    });
+    format!("{}/orbitd.sock", runtime_dir)
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Config {
     /// Private key for this node (hex encoded)
@@ -17,6 +27,9 @@ pub struct Config {
     pub peer_node_ids: Vec<String>,
     /// Optional human-readable name for this node (used for discovery)
     pub node_name: Option<String>,
+    /// Path to the RPC Unix socket
+    #[serde(default = "default_socket_path")]
+    pub socket_path: String,
 }
 
 pub fn new_secret_key() -> SecretKey {
@@ -35,6 +48,7 @@ impl Default for Config {
             mount_point: format!("{}/Orbit", home),
             peer_node_ids: Vec::new(),
             node_name: None,
+            socket_path: default_socket_path(),
         }
     }
 }

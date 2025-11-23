@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::io::Write;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::persistence::HistoryData;
@@ -11,6 +13,7 @@ use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::endpoint_info::UserData;
 use iroh::{Endpoint, EndpointAddr, PublicKey, SecretKey};
 use log::{debug, error, info, warn};
+use parking_lot::RwLock;
 
 // Re-export types needed by orbit-android
 pub use iroh::discovery::mdns::DiscoveryEvent as MdnsDiscoveryEvent;
@@ -81,6 +84,8 @@ pub struct IrohNetworkCommunication {
     content_notification_sender: Sender<ContentHash>,
     block_notification_sender: Sender<Vec<Block>>,
     pub mdns_discovery: Option<MdnsDiscovery>,
+    /// Currently discovered peers via mDNS (node_id -> name)
+    discovered_peers: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl IrohNetworkCommunication {
@@ -124,6 +129,16 @@ impl IrohNetworkCommunication {
         let (block_notification_sender, _block_notification_receiver) =
             tokio::sync::broadcast::channel(10);
         let (sender, _receiver) = tokio::sync::broadcast::channel(10);
+
+        let discovered_peers = Arc::new(RwLock::new(HashMap::new()));
+
+        // Start background task to update discovered peers from mDNS
+        let mdns_clone = mdns.clone();
+        let peers_clone = discovered_peers.clone();
+        tokio::spawn(async move {
+            Self::update_discovered_peers_task(mdns_clone, peers_clone).await;
+        });
+
         Ok(IrohNetworkCommunication {
             message_sender: sender.clone(),
             endpoint,
@@ -131,6 +146,7 @@ impl IrohNetworkCommunication {
             content_notification_sender,
             block_notification_sender,
             mdns_discovery: Some(mdns),
+            discovered_peers,
         })
     }
 
@@ -159,6 +175,56 @@ impl IrohNetworkCommunication {
                 warn!("Error accepting connections: {}", e);
             }
         });
+    }
+
+    /// Background task that continuously listens to mDNS events and updates the discovered peers list
+    async fn update_discovered_peers_task(
+        mdns: MdnsDiscovery,
+        peers: Arc<RwLock<HashMap<String, String>>>,
+    ) {
+        use futures::StreamExt;
+        use iroh::discovery::mdns::DiscoveryEvent;
+
+        let mut stream = mdns.subscribe().await;
+        info!("Started mDNS peer discovery background task");
+
+        while let Some(event) = stream.next().await {
+            match event {
+                DiscoveryEvent::Discovered { endpoint_info, .. } => {
+                    let node_id = hex::encode(endpoint_info.endpoint_id.as_bytes());
+                    let name = endpoint_info
+                        .user_data()
+                        .map(|data| data.as_ref())
+                        .and_then(|s| s.strip_prefix("orbit:"))
+                        .unwrap_or("unknown")
+                        .to_string();
+
+                    let mut peers_lock = peers.write();
+                    if !peers_lock.contains_key(&node_id) {
+                        peers_lock.insert(node_id.clone(), name.clone());
+                        info!("Discovered peer: {} ({})", name, &node_id[..16]);
+                    }
+                }
+                DiscoveryEvent::Expired { endpoint_id } => {
+                    let node_id = hex::encode(endpoint_id.as_bytes());
+                    if let Some(name) = peers.write().remove(&node_id) {
+                        info!("Peer expired: {} ({})", name, &node_id[..16]);
+                    }
+                }
+            }
+        }
+
+        warn!("mDNS peer discovery background task ended unexpectedly");
+    }
+
+    /// Get list of currently discovered peers via mDNS
+    /// Returns a list of (node_id, name) tuples
+    pub async fn get_discovered_peers(&self) -> Vec<(String, String)> {
+        self.discovered_peers
+            .read()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 
     async fn connect_to_peer(

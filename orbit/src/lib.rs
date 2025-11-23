@@ -20,6 +20,7 @@ pub mod config;
 pub mod fuse;
 pub mod network;
 pub mod persistence;
+pub mod rpc;
 
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
