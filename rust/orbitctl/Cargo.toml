@@ -1,0 +1,13 @@
+[package]
+name = "orbitctl"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+orbit = { path = "../orbit" }
+anyhow = "1.0.98"
+dialoguer = "0.11"
+tarpc = { version = "0.34", features = ["full"] }
+tokio = { version = "1.45.1", features = ["sync", "net", "io-util", "rt-multi-thread", "macros"] }
+tokio-serde = { version = "0.9", features = ["bincode"] }
+tokio-util = { version = "0.7", features = ["codec"] }

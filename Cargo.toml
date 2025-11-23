@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "orbit",
-    "orbit-android", "uniffi-bindgen",
+    "rust/orbit",
+    "rust/orbitd",
+    "rust/orbitctl",
+    "rust/orbit-android",
+    "rust/uniffi-bindgen",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
