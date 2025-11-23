@@ -33,6 +33,7 @@
   - Default mount point: `$HOME/Orbit`
   - Default data directory: `$XDG_DATA_HOME/orbit_data` (falls back to `$HOME/.local/share/orbit_data`)
   - Config file: `$XDG_CONFIG_HOME/orbitd.toml` (falls back to `$HOME/.config/orbitd.toml`)
+  - Default RPC socket: `$XDG_RUNTIME_DIR/orbitd.sock` (falls back to `/tmp/orbit-{USER}/orbitd.sock`)
   - Automatic private key generation and persistence
 - **Persistence**: All FsNodes and Directory structures automatically persisted to fjall database
 - **Root Hash Storage**: Root FsNodeHash stored in KV store under special key `__ROOT_HASH__`
@@ -53,8 +54,9 @@
 
 ## Dependencies
 - **Core**: `fjall` (embedded database), `fuser` (FUSE), `parking_lot` (better locks)
-- **Serialization**: `serde`, `ciborium` (CBOR), `toml`
+- **Serialization**: `serde`, `ciborium` (CBOR), `toml`, `bincode`
 - **Networking**: `iroh` (peer-to-peer), `tokio` (async runtime)
+- **RPC**: `tarpc` (RPC framework), `tokio-serde`, `tokio-util`
 - **Utilities**: `anyhow` (error handling), `clap` (CLI), `hex`, `base64`, `chrono`
 
 ## Advanced Architecture & Refactoring Learnings
@@ -118,3 +120,18 @@
 - **State Invariants**: All state transitions must preserve filesystem invariants throughout the process
 - **Dual Code Paths**: Both restart recovery and live update paths must correctly handle the same data
 - **Consistency Models**: Runtime state represents current truth; persistence provides durability and sync capability
+
+### RPC Interface
+- **Location**: Service definition in `orbit/src/rpc.rs`, implementation in `orbit/src/bin/orbitd.rs`
+- **Transport**: Unix socket using tarpc with bincode serialization over length-delimited codec
+- **Concurrency**: Runs as tokio task alongside FUSE mount and network services
+- **Methods**: Currently provides `get_node_id()` returning node's public key as hex string
+- **Extensibility**: Additional methods can be added to `OrbitRpc` trait as needed
+- **Client Usage**: Clients import `orbit::rpc::OrbitRpc` trait to use same interface definition
+
+## Documentation Style Preferences
+- **Scientific Tone**: Write documentation in technical, scientific style
+- **No Fluff**: Avoid subjective adjectives like "sophisticated", "powerful", "elegant"
+- **Abstract Design**: Design.md should contain abstract architecture, not implementation details
+- **No Code in Design**: Design documents should not include code examples or implementation specifics
+- **Factual**: Focus on facts, properties, and technical characteristics
