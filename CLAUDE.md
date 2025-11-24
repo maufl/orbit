@@ -18,7 +18,10 @@
 
 ## Development Practices
 - **Formatting**: Always run `rustfmt` on `.rs` files after making changes
-- **Testing**: Run integration tests with `cargo test --test basics -- --test-threads=1` (single-threaded for FUSE compatibility)
+- **Testing**:
+  - Orbit FUSE tests require single-threaded execution (configured in `.cargo/config.toml`)
+  - Run from anywhere: `cargo test --package orbit --features test-utils`
+  - The `RUST_TEST_THREADS=1` setting applies to all tests in the workspace
 - **Build Verification**: Run `cargo check` for quick compilation checks, `cargo build` for full builds
 - **Persistence Testing**: `test_persistence_infrastructure` verifies full file/directory restoration across filesystem restarts
 - **Error Handling**: Use `anyhow::Error` for better error handling, database initialization failures cause early failure

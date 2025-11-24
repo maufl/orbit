@@ -1,0 +1,5 @@
+# Cargo configuration for orbit crate
+# FUSE tests require single-threaded execution
+
+[env]
+RUST_TEST_THREADS = "1"
