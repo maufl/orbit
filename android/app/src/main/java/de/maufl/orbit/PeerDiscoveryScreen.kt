@@ -27,6 +27,7 @@ fun PeerDiscoveryScreen() {
     val context = LocalContext.current
     var orbitService by remember { mutableStateOf<OrbitService?>(null) }
     var discoveredPeers by remember { mutableStateOf<Map<String, PeerInfo>>(emptyMap()) }
+    var knownPeers by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     // Bind to OrbitService
     DisposableEffect(context) {
@@ -35,6 +36,12 @@ fun PeerDiscoveryScreen() {
                 Log.d("PeerDiscoveryScreen", "Connected to OrbitService")
                 val binder = service as OrbitService.OrbitBinder
                 orbitService = binder.getService()
+
+                // Load known peers
+                orbitService?.let {
+                    knownPeers = it.getKnownPeers().toSet()
+                    Log.d("PeerDiscoveryScreen", "Loaded ${knownPeers.size} known peers")
+                }
 
                 // Register peer discovery callback
                 Log.d("PeerDiscoveryScreen", "Registering peer discovery callback")
@@ -100,7 +107,15 @@ fun PeerDiscoveryScreen() {
             else -> {
                 LazyColumn {
                     items(discoveredPeers.values.toList()) { peer ->
-                        PeerListItem(peer = peer)
+                        PeerListItem(
+                            peer = peer,
+                            isKnownPeer = knownPeers.contains(peer.nodeId),
+                            onAddPeer = { nodeId ->
+                                orbitService?.addPeer(nodeId)
+                                knownPeers = knownPeers + nodeId
+                                Log.i("PeerDiscoveryScreen", "Added peer: $nodeId")
+                            }
+                        )
                     }
                 }
             }
@@ -109,7 +124,11 @@ fun PeerDiscoveryScreen() {
 }
 
 @Composable
-fun PeerListItem(peer: PeerInfo) {
+fun PeerListItem(
+    peer: PeerInfo,
+    isKnownPeer: Boolean,
+    onAddPeer: (String) -> Unit
+) {
     ListItem(
         headlineContent = {
             Text(
@@ -144,8 +163,16 @@ fun PeerListItem(peer: PeerInfo) {
             )
         },
         trailingContent = {
-            Button(onClick = { /* TODO: Implement add peer */ }) {
-                Text("Add")
+            if (isKnownPeer) {
+                Text(
+                    text = "Added",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            } else {
+                Button(onClick = { onAddPeer(peer.nodeId) }) {
+                    Text("Add")
+                }
             }
         }
     )

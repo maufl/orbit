@@ -87,11 +87,25 @@ async fn connect_to_peer(client: &OrbitRpcClient) -> Result<()> {
     if let Some(idx) = selection {
         let selected_peer = &peers[idx];
         println!(
-            "Selected peer: {} ({})",
+            "Adding peer: {} ({})",
             selected_peer.name, selected_peer.node_id
         );
-        // TODO: Implement actual connection logic
-        println!("Connection not yet implemented.");
+
+        // Call add_peer RPC
+        match client
+            .add_peer(tarpc::context::current(), selected_peer.node_id.clone())
+            .await?
+        {
+            Ok(()) => {
+                println!("✓ Successfully added peer!");
+                println!("  - Peer added to configuration");
+                println!("  - Control message sent to peer");
+                println!("  - FS connection established");
+            }
+            Err(err) => {
+                eprintln!("✗ Failed to add peer: {}", err);
+            }
+        }
     } else {
         println!("No peer selected.");
     }

@@ -26,6 +26,7 @@ pub struct Config {
 #[derive(uniffi::Object)]
 pub struct OrbitClient {
     fs_wrapper: RwLock<OrbitFsWrapper>,
+    orbit_fs: OrbitFs,
     config: Config,
     network_communication: Arc<IrohNetworkCommunication>,
     #[allow(dead_code)]
@@ -99,6 +100,9 @@ impl OrbitClient {
 
         let network_communication = Arc::new(network_communication);
 
+        // Set known peers list from config
+        network_communication.set_known_peers(config.peer_node_ids.clone());
+
         // Initialize Orbit
         let orbit_fs = OrbitFs::initialize(data_dir.clone(), Some(network_communication.clone()))
             .map_err(|e| OrbitError::InitializationError {
@@ -108,12 +112,17 @@ impl OrbitClient {
         runtime.block_on(async {
             // accept incoming connections
             network_communication.accept_connections(orbit_fs.clone());
+            // Connect to all peers from config
+            network_communication
+                .connect_to_all_peers(config.peer_node_ids.clone(), orbit_fs.clone())
+                .await;
         });
 
-        let fs_wrapper = OrbitFsWrapper::new(orbit_fs);
+        let fs_wrapper = OrbitFsWrapper::new(orbit_fs.clone());
 
         Ok(OrbitClient {
             fs_wrapper: RwLock::new(fs_wrapper),
+            orbit_fs,
             config: final_config,
             network_communication,
             runtime,
@@ -333,6 +342,77 @@ impl OrbitClient {
             }
         });
     }
+
+    /// Add a peer to the known peers list and establish connection
+    ///
+    /// This will:
+    /// 1. Validate the node ID format
+    /// 2. Add the peer to the runtime known peers list
+    /// 3. Send a PeerAdded control message to the peer
+    /// 4. Establish an FS connection for synchronization
+    ///
+    /// Note: The caller is responsible for persisting the peer to SharedPreferences
+    ///
+    /// # Arguments
+    /// * `node_id` - Hex-encoded node ID of the peer to add
+    ///
+    /// # Returns
+    /// * `Ok(())` if successful
+    /// * `Err(OrbitError)` if the node ID is invalid or already added
+    pub fn add_peer(&self, node_id: String) -> Result<(), OrbitError> {
+        info!("Adding peer: {}", node_id);
+
+        // Validate node ID format
+        hex::decode(&node_id).map_err(|_| OrbitError::InvalidPeerNodeId {
+            node_id: node_id.clone(),
+        })?;
+
+        // Add peer to network communication's known peers list
+        self.network_communication.add_known_peer(node_id.clone());
+
+        let network_communication = self.network_communication.clone();
+        let orbit_fs = self.orbit_fs.clone();
+
+        // Send PeerAdded control message and establish FS connection if peer acknowledges
+        self.runtime.spawn(async move {
+            // Send PeerAdded control message and wait for acknowledgment
+            match network_communication
+                .send_peer_added_message(node_id.clone())
+                .await
+            {
+                Ok(peer_added_us) => {
+                    if peer_added_us {
+                        log::info!(
+                            "Peer {} has also added us, establishing FS connection",
+                            node_id
+                        );
+                        // Establish FS connection now that both sides have confirmed
+                        network_communication
+                            .connect_to_all_peers(vec![node_id.clone()], orbit_fs)
+                            .await;
+                    } else {
+                        log::info!(
+                            "Peer {} has not added us yet, waiting for them to add us",
+                            node_id
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to send PeerAdded message: {}", e);
+                    // Don't return error here - peer is still added to known list
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Get the list of known peers
+    ///
+    /// Returns the list of peer node IDs from the configuration
+    pub fn get_known_peers(&self) -> Vec<String> {
+        self.config.peer_node_ids.clone()
+    }
 }
 
 /// Information about a filesystem node
@@ -436,6 +516,9 @@ pub enum OrbitError {
 
     #[error("File already exists: {path}")]
     FileExists { path: String },
+
+    #[error("Invalid peer node ID: {node_id}")]
+    InvalidPeerNodeId { node_id: String },
 }
 
 impl From<std::io::Error> for OrbitError {

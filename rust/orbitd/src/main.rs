@@ -8,7 +8,7 @@ use std::{path::PathBuf, thread};
 use tokio::net::UnixListener;
 use tokio::sync::broadcast::Receiver;
 
-use log::{LevelFilter, debug, error, info};
+use log::{LevelFilter, debug, error, info, warn};
 
 #[derive(Parser)]
 #[command(name = "orbitd")]
@@ -39,13 +39,22 @@ fn initialize_orbit_fs(
 struct OrbitRpcServer {
     node_id: String,
     network_communication: Arc<IrohNetworkCommunication>,
+    config_path: PathBuf,
+    orbit_fs: OrbitFs,
 }
 
 impl OrbitRpcServer {
-    fn new(node_id: String, network_communication: Arc<IrohNetworkCommunication>) -> Self {
+    fn new(
+        node_id: String,
+        network_communication: Arc<IrohNetworkCommunication>,
+        config_path: PathBuf,
+        orbit_fs: OrbitFs,
+    ) -> Self {
         Self {
             node_id,
             network_communication,
+            config_path,
+            orbit_fs,
         }
     }
 }
@@ -66,12 +75,78 @@ impl OrbitRpc for OrbitRpcServer {
             .map(|(node_id, name)| orbit::rpc::DiscoveredPeer { node_id, name })
             .collect()
     }
+
+    async fn add_peer(
+        self,
+        _context: tarpc::context::Context,
+        node_id: String,
+    ) -> Result<(), String> {
+        info!("Adding peer: {}", node_id);
+
+        // Validate node ID format
+        if hex::decode(&node_id).is_err() {
+            return Err("Invalid node ID format (must be hex)".to_string());
+        }
+
+        // Load config
+        let mut config = Config::load_from_file(&self.config_path)
+            .map_err(|e| format!("Failed to load config: {}", e))?;
+
+        // Check if peer already exists
+        if config.peer_node_ids.contains(&node_id) {
+            return Err("Peer already in known peers list".to_string());
+        }
+
+        // Add peer to config
+        config.add_peer_node_id(node_id.clone());
+        config
+            .save_to_file(&self.config_path)
+            .map_err(|e| format!("Failed to save config: {}", e))?;
+
+        info!("Added peer {} to config", node_id);
+
+        // Add peer to network communication's known peers list
+        self.network_communication.add_known_peer(node_id.clone());
+
+        // Send PeerAdded control message and wait for acknowledgment
+        match self
+            .network_communication
+            .send_peer_added_message(node_id.clone())
+            .await
+        {
+            Ok(peer_added_us) => {
+                if peer_added_us {
+                    info!(
+                        "Peer {} has also added us, establishing FS connection",
+                        node_id
+                    );
+                    // Establish FS connection now that both sides have confirmed
+                    self.network_communication
+                        .connect_to_all_peers(vec![node_id.clone()], self.orbit_fs)
+                        .await;
+                } else {
+                    info!(
+                        "Peer {} has not added us yet, waiting for them to add us",
+                        node_id
+                    );
+                }
+            }
+            Err(e) => {
+                warn!("Failed to send PeerAdded message: {}", e);
+                // Don't return error here - peer is still added to config
+            }
+        }
+
+        Ok(())
+    }
 }
 
 async fn run_rpc_server(
     socket_path: String,
     node_id: String,
     network_communication: Arc<IrohNetworkCommunication>,
+    config_path: PathBuf,
+    orbit_fs: OrbitFs,
 ) -> Result<(), anyhow::Error> {
     // Remove the socket file if it already exists
     if std::path::Path::new(&socket_path).exists() {
@@ -86,7 +161,7 @@ async fn run_rpc_server(
     let listener = UnixListener::bind(&socket_path)?;
     info!("RPC server listening on {}", socket_path);
 
-    let server = OrbitRpcServer::new(node_id, network_communication);
+    let server = OrbitRpcServer::new(node_id, network_communication, config_path, orbit_fs);
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -151,6 +226,10 @@ async fn main() -> Result<(), anyhow::Error> {
     let (shutdown_sender, shutdown_receiver) = tokio::sync::broadcast::channel(1);
     let iroh_network_communication =
         Arc::new(IrohNetworkCommunication::build(secret_key, config.node_name.clone()).await?);
+
+    // Set known peers list from config
+    iroh_network_communication.set_known_peers(config.peer_node_ids.clone());
+
     let orbit_fs = initialize_orbit_fs(&config, iroh_network_communication.clone());
     info!(
         "Current root hash is {}",
@@ -161,8 +240,18 @@ async fn main() -> Result<(), anyhow::Error> {
     let socket_path = config.socket_path.clone();
     let rpc_node_id = node_id.clone();
     let rpc_network_comm = iroh_network_communication.clone();
+    let rpc_config_path = config_path.clone();
+    let rpc_orbit_fs = orbit_fs.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_rpc_server(socket_path, rpc_node_id, rpc_network_comm).await {
+        if let Err(e) = run_rpc_server(
+            socket_path,
+            rpc_node_id,
+            rpc_network_comm,
+            rpc_config_path,
+            rpc_orbit_fs,
+        )
+        .await
+        {
             error!("RPC server error: {}", e);
         }
     });

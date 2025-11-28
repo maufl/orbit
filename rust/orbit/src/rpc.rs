@@ -17,4 +17,8 @@ pub trait OrbitRpc {
 
     /// Get list of peers discovered via mDNS
     async fn get_discovered_peers() -> Vec<DiscoveredPeer>;
+
+    /// Add a peer to the known peers list and establish connection
+    /// Returns Ok(()) if successful, Err(String) with error message otherwise
+    async fn add_peer(node_id: String) -> Result<(), String>;
 }

@@ -33,6 +33,7 @@ class OrbitService : Service() {
         private const val TAG = "OrbitService"
         private const val PREFS_NAME = "orbit_prefs"
         private const val KEY_PRIVATE_KEY = "private_key"
+        private const val KEY_PEER_NODE_IDS = "peer_node_ids"
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "orbit_service_channel"
     }
@@ -65,13 +66,24 @@ class OrbitService : Service() {
             Log.i(TAG, "No secret key found, will generate a new one")
         }
 
+        // Load peer node IDs from SharedPreferences
+        val peerNodeIdsStr = prefs.getString(KEY_PEER_NODE_IDS, "")
+        val peerNodeIds = if (peerNodeIdsStr.isNullOrEmpty()) {
+            Log.i(TAG, "No peers found in SharedPreferences")
+            listOf()
+        } else {
+            peerNodeIdsStr.split(",").filter { it.isNotEmpty() }.also {
+                Log.i(TAG, "Loaded ${it.size} peer(s) from SharedPreferences")
+            }
+        }
+
         // Create config with optional private key
         // Use device model as default node name
         val deviceName = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
         val config = Config(
             privateKey = privateKey,
             dataDir = filesDir.toString(),
-            peerNodeIds = listOf(),
+            peerNodeIds = peerNodeIds,
             nodeName = deviceName
         )
 
@@ -167,5 +179,29 @@ class OrbitService : Service() {
         Log.d(TAG, "registerPeerDiscoveryCallback called")
         orbitClient.registerPeerDiscoveryCallback(callback)
         Log.d(TAG, "Peer discovery callback registered with OrbitClient")
+    }
+
+    fun addPeer(nodeId: String) {
+        Log.i(TAG, "Adding peer: $nodeId")
+
+        // Add peer via OrbitClient (establishes connection)
+        orbitClient.addPeer(nodeId)
+
+        // Save to SharedPreferences
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val currentPeers = orbitClient.getKnownPeers().toMutableList()
+
+        if (!currentPeers.contains(nodeId)) {
+            currentPeers.add(nodeId)
+            val peerNodeIdsStr = currentPeers.joinToString(",")
+            prefs.edit { putString(KEY_PEER_NODE_IDS, peerNodeIdsStr) }
+            Log.i(TAG, "Saved peer to SharedPreferences, total peers: ${currentPeers.size}")
+        } else {
+            Log.i(TAG, "Peer already in known peers list")
+        }
+    }
+
+    fun getKnownPeers(): List<String> {
+        return orbitClient.getKnownPeers()
     }
 }
